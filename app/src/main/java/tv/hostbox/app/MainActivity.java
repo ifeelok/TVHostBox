@@ -1025,7 +1025,6 @@ public class MainActivity extends Activity {
         b.setMinHeight(0);
         b.setMinimumHeight(0);
         b.setPadding(dp(14), 0, dp(14), 0);
-        b.setIncludeForAccessibility(true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, dp(46));
         lp.setMargins(dp(5), 0, dp(5), 0);
