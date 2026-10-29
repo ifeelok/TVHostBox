@@ -23,6 +23,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -48,6 +49,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout navHostsBtn, navQrBtn, navCfBtn;
     private LinearLayout panelHosts, panelQr, panelCf;
+    private Button btnQrRefresh;
 
     // Hosts 面板
     private TextView tvRootStatus;
@@ -82,6 +84,9 @@ public class MainActivity extends Activity {
         navHostsBtn = findViewById(R.id.nav_hosts);
         navQrBtn = findViewById(R.id.nav_qr);
         navCfBtn = findViewById(R.id.nav_cf);
+        styleNav(navHostsBtn, false);
+        styleNav(navQrBtn, false);
+        styleNav(navCfBtn, false);
 
         panelHosts = buildHostsPanel();
         panelQr = buildQrPanel();
@@ -143,13 +148,21 @@ public class MainActivity extends Activity {
         styleNav(navQrBtn, index == 1);
         styleNav(navCfBtn, index == 2);
         if (index == 1) refreshQr();
+        // 焦点自动落位，避免遥控器"盲按"
+        if (index == 0) {
+            listHosts.requestFocus();
+        } else if (index == 1) {
+            btnQrRefresh.requestFocus();
+        } else if (index == 2) {
+            listCf.requestFocus();
+        }
     }
 
     private void styleNav(View v, boolean active) {
         if (v instanceof TextView) {
             TextView tv = (TextView) v;
             tv.setTextColor(active ? 0xFF0E1420 : COLOR_TEXT);
-            tv.setBackgroundColor(active ? COLOR_ACCENT : 0x00000000);
+            tv.setBackgroundResource(active ? R.drawable.btn_tab_active : R.drawable.btn_tv);
         }
     }
 
@@ -177,6 +190,7 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(8);
         listHosts.setLayoutParams(lp);
         listHosts.setBackgroundColor(COLOR_PANEL);
+        listHosts.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
         listHosts.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (position < 0 || position >= entries.size()) return;
@@ -287,6 +301,7 @@ public class MainActivity extends Activity {
         etDomain.setText(prefs.getString("lastDomain", ""));
         box.addView(etIp);
         box.addView(etDomain);
+        box.addView(buildDomainPicker(etDomain));
 
         new AlertDialog.Builder(this)
                 .setTitle("添加 hosts 条目")
@@ -390,9 +405,10 @@ public class MainActivity extends Activity {
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.CENTER_HORIZONTAL);
-        buttons.addView(actionButton("刷新二维码", new View.OnClickListener() {
+        btnQrRefresh = actionButton("刷新二维码", new View.OnClickListener() {
             @Override public void onClick(View v) { refreshQr(); }
-        }));
+        });
+        buttons.addView(btnQrRefresh);
         buttons.addView(actionButton("停止/启动服务", new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (ConfigServer.isRunning()) ConfigServer.stop(); else startServer();
@@ -486,6 +502,7 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(8);
         listCf.setLayoutParams(lp);
         listCf.setBackgroundColor(COLOR_PANEL);
+        listCf.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
         listCf.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (position < 0 || position >= cfResults.size()) return;
@@ -564,6 +581,7 @@ public class MainActivity extends Activity {
         etDomain.setText(prefs.getString("lastDomain", ""));
         box.addView(info);
         box.addView(etDomain);
+        box.addView(buildDomainPicker(etDomain));
 
         new AlertDialog.Builder(this)
                 .setTitle("将优选 IP 写入 hosts")
@@ -582,6 +600,48 @@ public class MainActivity extends Activity {
 
     // ==================== 通用 UI 辅助 ====================
 
+    /**
+     * 域名快捷选择：把当前 hosts 里的域名做成可点按钮列表，
+     * 避免在电视上用遥控器逐字母敲域名。
+     */
+    private View buildDomainPicker(final EditText etDomain) {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        java.util.LinkedHashSet<String> domains = new java.util.LinkedHashSet<String>();
+        for (HostsManager.Entry e : entries) domains.add(e.host);
+        if (domains.isEmpty()) return wrap;
+
+        TextView lbl = new TextView(this);
+        styleText(lbl, COLOR_HINT, 13);
+        lbl.setText("从现有条目选择域名：");
+        wrap.addView(lbl);
+
+        for (final String d : domains) {
+            Button chip = new Button(this);
+            chip.setText(d);
+            chip.setAllCaps(false);
+            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            chip.setTextColor(COLOR_ACCENT);
+            chip.setBackgroundResource(R.drawable.btn_tv);
+            chip.setPadding(dp(10), dp(6), dp(10), dp(6));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, dp(2), 0, dp(2));
+            chip.setLayoutParams(lp);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { etDomain.setText(d); }
+            });
+            wrap.addView(chip);
+        }
+        ScrollView sv = new ScrollView(this);
+        sv.addView(wrap);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(130));
+        lp.topMargin = dp(6);
+        sv.setLayoutParams(lp);
+        return sv;
+    }
+
     private LinearLayout verticalPanel() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -596,7 +656,7 @@ public class MainActivity extends Activity {
         b.setText(text);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         b.setTextColor(COLOR_TEXT);
-        b.setBackgroundResource(android.R.drawable.btn_default);
+        b.setBackgroundResource(R.drawable.btn_tv);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(dp(4), dp(6), dp(4), dp(6));
@@ -653,6 +713,7 @@ public class MainActivity extends Activity {
                 row.setOrientation(LinearLayout.VERTICAL);
                 int pad = dp(12);
                 row.setPadding(pad, pad, pad, pad);
+                row.setBackgroundResource(R.drawable.row_tv);
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 18);
                 tvSub = new TextView(MainActivity.this);
@@ -687,6 +748,7 @@ public class MainActivity extends Activity {
                 row.setOrientation(LinearLayout.VERTICAL);
                 int pad = dp(12);
                 row.setPadding(pad, pad, pad, pad);
+                row.setBackgroundResource(R.drawable.row_tv);
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 18);
                 tvSub = new TextView(MainActivity.this);
