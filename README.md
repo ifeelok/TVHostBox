@@ -1,9 +1,9 @@
-# HostBox · 魔百盒 Host 管家
+# TVHostBox · 电视Host管家
 
 适配 **移动魔百盒 CM311-1sa（Android 9，已 root）** 的电视端 hosts 管理工具。
 遥控器全程可操作，零第三方依赖（APK 仅 ~200KB）。
 
-![CI](https://github.com/ifeelok/hostbox/actions/workflows/android.yml/badge.svg)
+![CI](https://github.com/ifeelok/TVHostBox/actions/workflows/android.yml/badge.svg)
 
 ## 功能
 
@@ -30,7 +30,7 @@
 
 ```bash
 adb connect <盒子IP>:5555
-adb install HostBox-v1.0.0.apk
+adb install TVHostBox-v1.0.0.apk
 ```
 
 > 需要 root。首次写入 hosts 时 su 会弹授权（如有），允许即可。

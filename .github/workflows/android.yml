@@ -44,17 +44,17 @@ jobs:
 
       - name: Rename APK
         run: |
-          cp app/build/outputs/apk/release/*.apk HostBox-v1.0.0.apk
-          ls -lh HostBox-v1.0.0.apk
+          cp app/build/outputs/apk/release/*.apk TVHostBox-v1.0.0.apk
+          ls -lh TVHostBox-v1.0.0.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HostBox-apk
-          path: HostBox-v1.0.0.apk
+          name: TVHostBox-apk
+          path: TVHostBox-v1.0.0.apk
 
       - name: Attach to GitHub Release (tag push only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: HostBox-v1.0.0.apk
+          files: TVHostBox-v1.0.0.apk
