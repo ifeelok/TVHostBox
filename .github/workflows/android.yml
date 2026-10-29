@@ -47,19 +47,20 @@ jobs:
           HOSTBOX_KEY_ALIAS: hostbox
         run: gradle assembleRelease --no-daemon
 
-      - name: Rename APK
+      - name: Rename APK (version from git tag)
         run: |
-          cp app/build/outputs/apk/release/*.apk TVHostBox-v1.0.0.apk
-          ls -lh TVHostBox-v1.0.0.apk
+          VERSION="${GITHUB_REF_NAME}"
+          cp app/build/outputs/apk/release/*.apk "TVHostBox-$VERSION.apk"
+          ls -lh "TVHostBox-$VERSION.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: TVHostBox-apk
-          path: TVHostBox-v1.0.0.apk
+          path: TVHostBox-*.apk
 
       - name: Attach to GitHub Release (tag push only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: TVHostBox-v1.0.0.apk
+          files: TVHostBox-*.apk
