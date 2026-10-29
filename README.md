@@ -1,61 +1,150 @@
 # TVHostBox · 电视Host管家
 
-适配 **移动魔百盒 CM311-1sa（Android 9，已 root）** 的电视端 hosts 管理工具。
-遥控器全程可操作，零第三方依赖，APK 体积小巧。
+**给 Android 设备用的 hosts 管理工具**：遥控器就能增删 hosts 条目，手机扫码即可在网页里批量编辑，
+还能跑 Cloudflare 优选 IP 并一键写成某个域名的解析。
+
+> 通用工具，不绑定具体机型。已在 **移动魔百盒 CM311-1sa（Android 9，已 root）** 上实机长期验证。
 
 ![CI](https://github.com/ifeelok/TVHostBox/actions/workflows/android.yml/badge.svg)
+![minSdk](https://img.shields.io/badge/minSdk-21-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
+---
+
+## 为什么做这个
+
+电视盒子改 hosts 一直很别扭：要么开 adb 敲命令，要么装个手机端编辑器再想办法把文件推过去，
+改完还得自己处理备份、权限、remount。
+
+这个 App 把这几件事合到一起：
+
+- 坐在沙发上用遥控器删掉一条解析，不用碰电脑
+- 手机上扫码打开一个网页，卡片式增删、全文编辑，比遥控器打字快得多
+- 内置 Cloudflare 优选（延迟 + 真实下载测速），测完直接把 IP 写成你的域名解析
+- 每次写入自动备份，改坏了能一键回滚
+
+## 实测设备
+
+| 项目 | 情况 |
+|---|---|
+| 机型 | 移动魔百盒 **CM311-1sa**（CM311-1sa-ZG2） |
+| 系统 | Android 9 |
+| 状态 | 已 root，`/system` 可 remount 读写 |
+| 结果 | hosts 读写、备份恢复、扫码配置、CF 测速与写入，全部实机跑通 |
+
+机型只是我的验证环境，程序里没有一行机型相关逻辑：
+
+- **纯 Java，零 native 库**（二维码也是纯 Java 实现），因此 `armeabi-v7a` / `arm64-v8a` / `x86` / `x86_64` 全架构通用
+- 不依赖任何厂商 SDK，也没有机型白名单
+- `minSdk 21`（Android 5.0），只要设备**已 root 且 `/system` 能 remount 成可写**，理论上都能用：
+  电视盒子、Android TV、手机、平板、开发板都行
 
 ## 功能
 
 | 功能 | 说明 |
 |---|---|
-| **Hosts 管理** | 列出 `/system/etc/hosts` 全部条目，选中即可删除；支持手动添加、自动备份、从备份恢复 |
-| **扫码配置** | 电视端显示二维码，手机扫码后进入卡片式配置页：增删单条、一键替换、全文编辑（内置 HTTP 服务，端口 `18123`） |
-| **CF 优选** | 从 Cloudflare 官方 IPv4 网段采样 → TCP 443 并发延迟测试 → HTTPS 下载测速 → 筛出前 8 名 |
-| **优选应用** | 把选中的优选 IP 写为指定域名的解析（写进 hosts，Emby 直连等场景立即可用） |
+| **Hosts 管理** | 列出 `/system/etc/hosts` 全部条目，选中按 OK 删除；支持手动添加、查看备份列表、一键恢复 |
+| **扫码配置** | 设备端显示二维码，手机扫码进入卡片式网页：增删单条、点条目带入修改、全文编辑（内置 HTTP 服务，端口 `18123`） |
+| **CF 优选** | 从 Cloudflare 官方 IPv4 网段采样 → TCP 443 并发延迟测试 → HTTPS 真实下载测速 → 按速度排序取前 N 名 |
+| **优选应用** | 把选中的优选 IP 写成指定域名的解析（写进 hosts，Emby / Jellyfin 直连之类场景立刻见效） |
+
+## 界面
+
+三个页签，遥控器左右切换、上下移动、OK 确认，全程不需要鼠标：
+
+- **Hosts 管理**：条目列表（`域名 → IP` + 行号 / 注释），底部「刷新 / 添加条目 / 备份列表 / 设置」
+- **扫码配置**：二维码 + 访问地址 + 服务启停状态，「刷新二维码 / 启动·停止服务」
+- **CF 优选**：「开始优选」主按钮 + 进度说明 + 结果列表（延迟 / Mbps，未测速的行灰显置后）
+
+设置项收在「Hosts 管理 → 设置」里，包括备份保留数量和 CF 测速参数，避免主界面堆太多东西。
 
 ## 工作原理
 
-- 修改的是系统级 `/system/etc/hosts`，在 `getaddrinfo` 阶段生效，**优先于一切 DNS**；
-  因此与 CMFA（Clash Meta）共存时，配合 `IP-CIDR,...,DIRECT,no-resolve` 规则即可让
-  Emby 等域名走优选 IP 直连。
-- 写入流程：自动备份原文件到 `/sdcard/hostbox/` → `mount -o rw,remount` →
-  覆盖 → `chmod 644` → 回读校验。写入失败不会破坏原文件。
-- 扫码配置：App 在盒子 `0.0.0.0:18123` 起一个 HTTP 服务，二维码内容即
-  `http://<盒子IP>:18123`；手机浏览器打开后可查看条目列表、逐条删除、
-  填写「IP + 域名」写入、或展开全文编辑。手机端只发指令，写入仍由盒子端完成，
-  所以每次改动都会照常备份到 `/sdcard/hostbox/`。
+**改的是什么**：系统级 `/system/etc/hosts`。它在 `getaddrinfo` 阶段生效，优先于一切 DNS，
+不经过任何代理 / 分流库。所以在 CMFA（Clash Meta）、Surfboard 这类工具里配合
+`IP-CIDR,<优选IP>/32,DIRECT,no-resolve` 规则，就能让特定域名走优选 IP 直连，其余照常走代理。
+
+**写入流程**（每步都校验，失败不破坏原文件）：
+
+```
+备份 /system/etc/hosts → /sdcard/hostbox/hosts.bak.<时间戳>
+  → mount -o rw,remount /system
+  → 写入新内容
+  → chmod 644
+  → 回读比对校验
+```
+
+root 命令通过一个常驻 `su` 会话执行（自带 20 秒看门狗，会话挂了自动重建重试），
+不用每次 fork 一个新的 su 进程。
+
+**扫码配置**：App 在设备 `0.0.0.0:18123` 起一个极简 HTTP 服务，二维码内容就是
+`http://<设备IP>:18123`。手机浏览器打开后可列表查看、逐条删除、填「IP + 域名」写入，
+或展开全文编辑批量改。手机端只发指令，**写入仍然由设备端完成**，所以每次改动照样自动备份。
 
 ## 安装
 
-到 [Releases](../../releases) 下载最新 APK（或从 Actions 的 artifact 下载），然后：
+1. 到 [Releases](../../releases) 下载 `TVHostBox-v<版本号>.apk`
+2. 装到设备上，任选一种：
+   ```bash
+   adb connect <设备IP>:5555
+   adb install -r TVHostBox-v<版本号>.apk
+   ```
+   或者拷到 U 盘插到盒子上用文件管理器装，也可以用电视助手类工具推送。
 
-```bash
-adb connect <盒子IP>:5555
-adb install TVHostBox-<版本号>.apk
-```
+首次写入 hosts 时 `su` 会弹授权，允许即可（部分系统的授权弹窗在电视上需要遥控器确认）。
 
-> 需要 root。首次写入 hosts 时 su 会弹授权（如有），允许即可。
-> 从 v1.0.0（临时签名版）升级需先 `adb uninstall tv.hostbox.app`；v1.0.1 起签名固定，之后可正常覆盖升级。
+> 从 v1.0.0（临时签名版）升级需先 `adb uninstall tv.hostbox.app`；
+> v1.0.1 起签名固定，之后都能正常覆盖升级。
 
 ## 使用
 
-1. 打开 App，顶部三个页签：**Hosts 管理 / 扫码配置 / CF 优选**。
-2. **删除某条 host**：Hosts 管理页 → 选中条目 → OK 键 → 确认删除。
-3. **手机配置**：扫码配置页 → 手机扫屏幕上的二维码 → 在网页里点条目删除、
-   填 IP 和域名写入、或展开「高级 · 全文编辑」批量改 → 保存即生效（自动备份）。
-4. **CF 优选**：CF 优选页 → 「开始优选」→ 等待两轮测速 → 选中一个结果 →
-   输入要应用的域名（如 `emby-proxy.example.com`）→ 写入。
+- **删除一条解析**：Hosts 管理 → 上下选中条目 → OK → 确认删除（默认焦点在「取消」，误按不会删）
+- **手机批量配置**：扫码配置 → 手机扫码 → 网页里点条目 ✕ 删除、或点条目带入后改 IP 再保存、
+  或展开「高级 · 全文编辑」直接改全文 → 保存即生效
+- **优选 IP 并应用**：CF 优选 → 「开始优选」→ 等两轮测速 → 选中一个结果 →
+  输入要应用的域名（如 `emby.example.com`）→ 写入
+- **改坏了想回滚**：Hosts 管理 → 备份列表 → 选一个时间点恢复（恢复前会先把当前文件再存一份）
+
+## 设置项
+
+| 设置 | 可选值 | 默认 |
+|---|---|---|
+| 备份保留数量 | 10 / 20 / 50 / 不限 | 20 |
+| CF 优选结果保留前几名 | 5 / 8 / 10 / 15 | 8 |
+| CF 网段采样数量 | 160（快）/ 320（标准）/ 640（充分） | 320 |
+| 每个候选 IP 的测速下载量 | 2 MB（快）/ 6 MB（标准）/ 12 MB（精确） | 6 MB |
+
+采样越多、下载量越大越准，也越慢；一般家用网络用默认值就够。
+
+## 常见问题
+
+**改了 hosts 要重启吗？**
+不用，新的 DNS 查询立刻生效。但已经在跑的 App 可能缓存了旧解析，重启那个 App 即可。
+
+**提示没有 root / 写入失败？**
+先确认 `su` 可用（`adb shell su -c id` 应返回 `uid=0`），并且 `/system` 分区能 remount 成可写。
+少数机型有 dm-verity / AVB 只读保护，这类设备需要先关闭校验才能改系统分区。
+
+**手机打不开那个网页？**
+手机和设备要连同一个 Wi-Fi（同一网段），并关掉路由器的 AP 隔离 / 客户端隔离——它会把设备互相屏蔽。
+也可以照页面上显示的地址手动输入，或改用有线 IP。
+
+**为什么 targetSdk 停在 28？**
+刻意保留低位，规避 Android 10+ 的 scoped storage 和 cleartext 限制——这个 App 要写 `/system`、
+要起明文 HTTP 服务，抬上去只是给自己加限制。目标设备是 Android 9 的盒子，够用。
+
+**备份存在哪？**
+`/sdcard/hostbox/hosts.bak.<时间戳>`，超出保留数量时自动清理最旧的。
 
 ## 自己编译
 
-推送任意 commit 到 `main` 分支即触发 GitHub Actions 自动编译，
-APK 在构建结果的 Artifacts 里；打 `v*` 标签会同时创建 Release 并附上 APK。
+推任意 commit 到 `main` 就触发 GitHub Actions 自动编译，APK 在构建产物的 Artifacts 里；
+打 `v*` 标签会额外创建 Release 并附上 APK。版本号由 tag 驱动
+（`v1.0.8` → `versionName 1.0.8`、`versionCode 10008`）。
 
-本地编译（可选）：
+本地编译（可选，需要 JDK 17 + Android SDK）：
 
 ```bash
-# 需要 JDK 17 + Android SDK
 gradle assembleRelease
 ```
 
@@ -63,25 +152,26 @@ gradle assembleRelease
 
 ```
 app/src/main/java/tv/hostbox/app/
-├── MainActivity.java    # TV 三页签 UI（遥控器可操作）
+├── MainActivity.java    # TV 三页签 UI（遥控器导航、焦点管理）
 ├── HostsManager.java    # hosts 解析 / 校验 / root 写入 / 备份恢复
-├── RootShell.java       # su 命令执行（零依赖版 libsu）
-├── ConfigServer.java    # 手机扫码配置的 HTTP 服务（含 /api/state /api/set /api/delete）
-└── CfOptimizer.java     # Cloudflare 优选（延迟 + 下载测速）
+├── RootShell.java       # 常驻 su 会话（零依赖版 libsu）
+├── ConfigServer.java    # 手机扫码配置的 HTTP 服务（/api/state /api/set /api/delete）
+└── CfOptimizer.java     # Cloudflare 优选（延迟 + 下载测速，裸 SSLSocket 手写请求）
 app/src/main/assets/mobile.html          # 手机端配置页（自成一体，不依赖任何 CDN）
 app/src/main/java/io/nayuki/qrcodegen/   # QR 码生成（Nayuki, MIT）
 ```
 
 ## 兼容性
 
-- 已验证目标：魔百盒 CM311-1sa-ZG2 / Android 9 / armeabi-v7a+（通用字节码）
-- 任何 **已 root、可 remount /system** 的 Android 5.0+ 设备理论上都可用
-- Android TV / 手机均可安装，UI 按横屏电视设计
+- **已验证**：移动魔百盒 CM311-1sa / Android 9 / 已 root
+- **理论支持**：Android 5.0+ 且已 root、`/system` 可 remount 为可写的任何设备
+- **架构**：全架构（纯 Java，无 native 库）
+- **界面**：按横屏电视设计（大字号、强焦点态）；竖屏手机也能装能跑，只是布局未专门优化
 
 ## 免责声明
 
-本项目仅用于管理自有设备的本地域名解析。请遵守当地法律法规使用。
+本项目仅用于管理自有设备的本地域名解析。请遵守当地法律法规与网络服务条款使用。
 
 ## License
 
-[MIT](./LICENSE)（含内嵌的 [Nayuki QR-Code-generator](https://github.com/nayuki/QR-Code-generator)，MIT）
+[MIT](./LICENSE)（含内嵌的 [Nayuki QR-Code-generator](https://github.com/nayuki/QR-code-generator)，MIT）
