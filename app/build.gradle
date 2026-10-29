@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// 取版本号第 i 段为整数，非数字（如 "0-dev"）或越界按 0 处理
+static int segInt(String[] segs, int i) {
+    if (i >= segs.length) return 0
+    def m = segs[i] =~ /\d+/
+    return m.find() ? m.group().toInteger() : 0
+}
+
 android {
     namespace 'tv.hostbox.app'
     compileSdk 34
@@ -16,9 +23,8 @@ android {
         // versionCode 由 versionName 自动推导（major*10000+minor*100+patch），
         // 本地直接构建时使用下面的默认值兜底
         def vName = (project.findProperty('appVersionName') ?: '1.0.4').toString()
-        versionCode = vName.tokenize('.').withIndex().sum { seg, i ->
-            (seg.isNumber() ? seg.toInteger() : 0) * (10000.intdiv(100 ** i))
-        }
+        def vSeg = vName.split('\\.')                // "1.0.4" → [1, 0, 4]
+        versionCode = segInt(vSeg, 0) * 10000 + segInt(vSeg, 1) * 100 + segInt(vSeg, 2)
         versionName = vName
     }
 
