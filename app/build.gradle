@@ -24,7 +24,10 @@ android {
         // 本地直接构建时使用下面的默认值兜底
         def vName = (project.findProperty('appVersionName') ?: '1.0.4').toString()
         def vSeg = vName.split('\\.')                // "1.0.4" → [1, 0, 4]
-        versionCode = segInt(vSeg, 0) * 10000 + segInt(vSeg, 1) * 100 + segInt(vSeg, 2)
+        // dev 构建（普通 push/PR）用时间戳派生 versionCode，保证为正且不与正式版冲突
+        versionCode = vName.contains('dev') ?
+                (System.currentTimeMillis().intdiv(1000) - 1700000000) :
+                segInt(vSeg, 0) * 10000 + segInt(vSeg, 1) * 100 + segInt(vSeg, 2)
         versionName = vName
     }
 
