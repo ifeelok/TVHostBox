@@ -1,7 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 列表选中行（ListView 的行不会真正获得 focus，只能由 adapter 主动套这个背景） -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="#1B3E5C" />
-    <stroke android:width="2dp" android:color="#4FC3F7" />
-    <corners android:radius="8dp" />
-</shape>
+<!-- 列表选中行（ListView 的行不会真正获得 focus，只能由 adapter 主动套这个背景）：
+     左侧一条青色指示条 + 半透明青底，比整行描边更"轻"，也不容易被长文本挡住 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <solid android:color="#17324A" />
+            <stroke android:width="1dp" android:color="#2E5B7A" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item android:width="5dp" android:gravity="left|center_vertical">
+        <shape>
+            <solid android:color="#4FC3F7" />
+            <corners android:radius="3dp" />
+        </shape>
+    </item>
+</layer-list>

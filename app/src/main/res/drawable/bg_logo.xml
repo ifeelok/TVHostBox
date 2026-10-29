@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 品牌角标：左上角的小方块 logo，与手图标风格呼应 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient android:startColor="#7DDCFF" android:endColor="#2F7CF6" android:angle="315" />
+    <corners android:radius="10dp" />
+</shape>

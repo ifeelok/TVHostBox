@@ -88,6 +88,7 @@ public class MainActivity extends Activity {
         navHostsBtn = findViewById(R.id.nav_hosts);
         navQrBtn = findViewById(R.id.nav_qr);
         navCfBtn = findViewById(R.id.nav_cf);
+        tvRootStatus = findViewById(R.id.root_pill);
         styleNav(navHostsBtn, false);
         styleNav(navQrBtn, false);
         styleNav(navCfBtn, false);
@@ -227,8 +228,10 @@ public class MainActivity extends Activity {
     private void styleNav(View v, boolean active) {
         if (v instanceof TextView) {
             TextView tv = (TextView) v;
-            tv.setTextColor(active ? 0xFF0E1420 : COLOR_TEXT);
-            tv.setBackgroundResource(active ? R.drawable.btn_tab_active : R.drawable.btn_tv);
+            tv.setAllCaps(false);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+            tv.setTextColor(active ? 0xFF08131F : 0xFFB9C6D8);
+            tv.setBackgroundResource(active ? R.drawable.btn_tab_active : R.drawable.btn_tab);
         }
     }
 
@@ -274,16 +277,12 @@ public class MainActivity extends Activity {
     private LinearLayout buildHostsPanel() {
         LinearLayout root = verticalPanel();
 
-        tvRootStatus = new TextView(this);
-        styleText(tvRootStatus, COLOR_HINT, 14);
-        tvRootStatus.setText("正在检测 root …");
-
         TextView title = new TextView(this);
-        styleText(title, COLOR_TEXT, 24);
-        title.setText("当前 hosts 条目（选中按 OK 删除）");
+        styleTitle(title, "Hosts 条目", "选中某条按 OK 删除，改动前会自动备份");
 
         tvHostsSummary = new TextView(this);
-        styleText(tvHostsSummary, COLOR_HINT, 14);
+        styleText(tvHostsSummary, COLOR_HINT, 13);
+        tvHostsSummary.setPadding(dp(2), dp(4), 0, dp(2));
 
         hostsAdapter = new HostsAdapter();
         listHosts = new ListView(this);
@@ -292,7 +291,9 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         lp.topMargin = dp(8);
         listHosts.setLayoutParams(lp);
-        listHosts.setBackgroundColor(COLOR_PANEL);
+        listHosts.setBackgroundResource(R.drawable.card_bg);
+        listHosts.setPadding(dp(6), dp(6), dp(6), dp(6));
+        listHosts.setClipToOutline(true);
         listHosts.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
         listHosts.setDivider(null);
         listHosts.setDividerHeight(0);
@@ -315,15 +316,19 @@ public class MainActivity extends Activity {
         TextView tvEmptyHosts = new TextView(this);
         styleText(tvEmptyHosts, COLOR_HINT, 16);
         tvEmptyHosts.setGravity(Gravity.CENTER);
-        tvEmptyHosts.setText("暂无 hosts 条目\n\n按下方「添加条目」新增，\n或到「扫码配置」用手机添加");
+        tvEmptyHosts.setLineSpacing(dp(4), 1f);
+        tvEmptyHosts.setText("这里还没有 hosts 条目\n用下方「添加条目」，或用手机扫码批量编辑");
+        tvEmptyHosts.setBackgroundResource(R.drawable.card_bg);
         LinearLayout.LayoutParams lpEmpty = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lpEmpty.topMargin = dp(8);
         tvEmptyHosts.setLayoutParams(lpEmpty);
         listHosts.setEmptyView(tvEmptyHosts);
 
         // 操作结果持久显示（Toast 在电视上太短暂）
         tvActionResult = new TextView(this);
-        styleText(tvActionResult, COLOR_HINT, 14);
+        styleText(tvActionResult, COLOR_HINT, 13);
+        tvActionResult.setPadding(dp(2), dp(6), dp(2), 0);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -333,19 +338,16 @@ public class MainActivity extends Activity {
         Button btnAdd = actionButton("添加条目", new View.OnClickListener() {
             @Override public void onClick(View v) { showAddDialog(); }
         });
-        Button btnBackup = actionButton("备份列表", new View.OnClickListener() {
+        Button btnBackup = actionButton("备份", new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
         });
         Button btnSettings = actionButton("设置", new View.OnClickListener() {
             @Override public void onClick(View v) { showSettingsDialog(); }
         });
-        buttons.addView(btnHostsRefresh);
-        buttons.addView(btnAdd);
-        buttons.addView(btnBackup);
-        buttons.addView(btnSettings);
-        wireButtonRow(new Button[]{btnHostsRefresh, btnAdd, btnBackup, btnSettings}, listHosts);
+        Button[] row = {btnHostsRefresh, btnAdd, btnBackup, btnSettings};
+        addButtons(buttons, row);
+        wireButtonRow(row, listHosts);
 
-        root.addView(tvRootStatus);
         root.addView(title);
         root.addView(tvHostsSummary);
         root.addView(listHosts);
@@ -387,10 +389,12 @@ public class MainActivity extends Activity {
                 final boolean ok = RootShell.isRootAvailable();
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        tvRootStatus.setText(ok
-                                ? "✔ root 可用，可以修改 hosts"
-                                : "✘ 未获取 root，修改/写入功能不可用");
-                        tvRootStatus.setTextColor(ok ? 0xFF66BB6A : COLOR_DANGER);
+                        if (tvRootStatus == null) return;
+                        tvRootStatus.setText(ok ? "✔ root 可用" : "✘ 未获取 root");
+                        tvRootStatus.setTextColor(ok ? 0xFF8FD8A8 : 0xFFFFB4AB);
+                        tvRootStatus.setBackgroundResource(
+                                ok ? R.drawable.bg_pill_ok : R.drawable.bg_pill_bad);
+                        if (!ok) toast("未获取 root，写入/删除不可用");
                     }
                 });
             }
@@ -633,31 +637,43 @@ public class MainActivity extends Activity {
     private LinearLayout buildQrPanel() {
         LinearLayout root = verticalPanel();
 
-        TextView tip = new TextView(this);
-        styleText(tip, COLOR_HINT, 16);
-        tip.setText("手机扫码后可在网页里增删条目、批量编辑，保存后自动备份到 /sdcard/hostbox");
+        TextView title = new TextView(this);
+        styleTitle(title, "扫码配置", "手机与盒子连同一个 Wi-Fi，扫码后在网页里增删条目");
 
         imgQr = new ImageView(this);
-        // 按屏幕宽度自适应，避免低分辨率/小屏盒子溢出（不超过屏宽 45%）
-        int qrSide = (int) Math.min(dp(300),
-                getResources().getDisplayMetrics().widthPixels * 0.45f);
+        // 按屏幕宽度自适应，避免低分辨率/小屏盒子溢出（不超过屏宽 42%）
+        int qrSide = (int) Math.min(dp(280),
+                getResources().getDisplayMetrics().widthPixels * 0.42f);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
-        lp.topMargin = dp(10);
+        lp.topMargin = dp(14);
         imgQr.setLayoutParams(lp);
-        imgQr.setBackgroundColor(Color.WHITE);
-        imgQr.setPadding(dp(8), dp(8), dp(8), dp(8));
+        imgQr.setBackgroundResource(R.drawable.qr_frame);
+        imgQr.setPadding(dp(10), dp(10), dp(10), dp(10));
 
         tvQrUrl = new TextView(this);
-        styleText(tvQrUrl, COLOR_ACCENT, 20);
+        styleText(tvQrUrl, COLOR_ACCENT, 21);
         tvQrUrl.setGravity(Gravity.CENTER_HORIZONTAL);
+        tvQrUrl.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tvQrUrl.setPadding(0, dp(12), 0, dp(4));
 
         tvServerStatus = new TextView(this);
-        styleText(tvServerStatus, COLOR_HINT, 14);
-        tvServerStatus.setGravity(Gravity.CENTER_HORIZONTAL);
+        styleText(tvServerStatus, COLOR_HINT, 13);
+        tvServerStatus.setGravity(Gravity.CENTER);
+        tvServerStatus.setBackgroundResource(R.drawable.bg_pill_neutral);
+        tvServerStatus.setPadding(dp(14), dp(6), dp(14), dp(6));
+        LinearLayout.LayoutParams lpStatus = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpStatus.gravity = Gravity.CENTER_HORIZONTAL;
+        lpStatus.topMargin = dp(8);
+        tvServerStatus.setLayoutParams(lpStatus);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams lpBtnRow = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpBtnRow.topMargin = dp(10);
+        buttons.setLayoutParams(lpBtnRow);
         btnQrRefresh = actionButton("刷新二维码", new View.OnClickListener() {
             @Override public void onClick(View v) { refreshQr(); }
         });
@@ -671,11 +687,11 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        buttons.addView(btnQrRefresh);
-        buttons.addView(btnQrService);
-        wireButtonRow(new Button[]{btnQrRefresh, btnQrService}, null);
+        Button[] row = {btnQrRefresh, btnQrService};
+        addButtons(buttons, row);
+        wireButtonRow(row, null);
 
-        root.addView(tip);
+        root.addView(title);
         root.addView(imgQr);
         root.addView(tvQrUrl);
         root.addView(tvServerStatus);
@@ -707,9 +723,11 @@ public class MainActivity extends Activity {
         boolean running = ConfigServer.isRunning();
         if (tvServerStatus != null) {
             tvServerStatus.setText(running
-                    ? "配置服务已启动 · 手机需与盒子连同一个 Wi-Fi"
-                    : "配置服务已停止 · 先点「启动服务」再扫码");
-            tvServerStatus.setTextColor(running ? COLOR_HINT : COLOR_DANGER);
+                    ? "✔ 配置服务运行中 · 手机需与盒子连同一个 Wi-Fi"
+                    : "✘ 配置服务已停止 · 先点「启动服务」再扫码");
+            tvServerStatus.setTextColor(running ? 0xFF8FD8A8 : 0xFFFFB4AB);
+            tvServerStatus.setBackgroundResource(
+                    running ? R.drawable.bg_pill_ok : R.drawable.bg_pill_bad);
         }
         if (btnQrService != null) btnQrService.setText(running ? "停止服务" : "启动服务");
 
@@ -758,22 +776,39 @@ public class MainActivity extends Activity {
     private LinearLayout buildCfPanel() {
         LinearLayout root = verticalPanel();
 
+        TextView title = new TextView(this);
+        styleTitle(title, "Cloudflare 优选", "从官方网段采样 → 延迟测试 → 下载测速，挑出最快的几个 IP");
+
         btnCfStart = actionButton("开始优选（延迟 + 下载测速）", new View.OnClickListener() {
             @Override public void onClick(View v) { startCfOptimize(); }
         });
+        stylePrimary(btnCfStart);
+        LinearLayout.LayoutParams lpStart = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
+        lpStart.topMargin = dp(10);
+        btnCfStart.setLayoutParams(lpStart);
 
         tvCfProgress = new TextView(this);
-        styleText(tvCfProgress, COLOR_HINT, 15);
+        styleText(tvCfProgress, COLOR_HINT, 14);
+        tvCfProgress.setLineSpacing(dp(3), 1f);
+        tvCfProgress.setBackgroundResource(R.drawable.card_bg);
+        tvCfProgress.setPadding(dp(14), dp(10), dp(14), dp(10));
         tvCfProgress.setText("对 Cloudflare 网段采样 → TCP 443 延迟测试 → 下载测速。\n完成后选中某条按 OK 应用到域名（参数在 hosts 页「设置」里调）。");
+        LinearLayout.LayoutParams lpProg = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpProg.topMargin = dp(10);
+        tvCfProgress.setLayoutParams(lpProg);
 
         cfAdapter = new CfAdapter();
         listCf = new ListView(this);
         listCf.setAdapter(cfAdapter);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lp.topMargin = dp(8);
+        lp.topMargin = dp(10);
         listCf.setLayoutParams(lp);
-        listCf.setBackgroundColor(COLOR_PANEL);
+        listCf.setBackgroundResource(R.drawable.card_bg);
+        listCf.setPadding(dp(6), dp(6), dp(6), dp(6));
+        listCf.setClipToOutline(true);
         listCf.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
         listCf.setDivider(null);
         listCf.setDividerHeight(0);
@@ -795,12 +830,16 @@ public class MainActivity extends Activity {
         TextView tvEmptyCf = new TextView(this);
         styleText(tvEmptyCf, COLOR_HINT, 16);
         tvEmptyCf.setGravity(Gravity.CENTER);
-        tvEmptyCf.setText("尚未测速\n\n按上方「开始优选」获取 Cloudflare 优选 IP\n（可在 hosts 页「设置」里调参数）");
+        tvEmptyCf.setLineSpacing(dp(4), 1f);
+        tvEmptyCf.setText("还没有优选结果\n按上方「开始优选」，等延迟和速度都跑完");
+        tvEmptyCf.setBackgroundResource(R.drawable.card_bg);
         LinearLayout.LayoutParams lpEmpty = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lpEmpty.topMargin = dp(8);
         tvEmptyCf.setLayoutParams(lpEmpty);
         listCf.setEmptyView(tvEmptyCf);
 
+        root.addView(title);
         root.addView(btnCfStart);
         root.addView(tvCfProgress);
         root.addView(listCf);
@@ -968,8 +1007,7 @@ public class MainActivity extends Activity {
     private LinearLayout verticalPanel() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(20);
-        root.setPadding(pad, pad, pad, pad);
+        root.setPadding(dp(20), dp(8), dp(20), dp(16));
         root.setBackgroundColor(COLOR_BG);
         return root;
     }
@@ -977,15 +1015,58 @@ public class MainActivity extends Activity {
     private Button actionButton(String text, View.OnClickListener listener) {
         Button b = new Button(this);
         b.setText(text);
+        b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         b.setTextColor(COLOR_TEXT);
         b.setBackgroundResource(R.drawable.btn_tv);
+        // 去掉 Button 默认的左右内缩和最小宽度，否则等宽排布时文字会被裁
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setPadding(dp(14), 0, dp(14), 0);
+        b.setIncludeForAccessibility(true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(dp(4), dp(6), dp(4), dp(6));
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(46));
+        lp.setMargins(dp(5), 0, dp(5), 0);
         b.setLayoutParams(lp);
         b.setOnClickListener(listener);
         return b;
+    }
+
+    /** 主操作按钮：渐变蓝底 + 白字加粗，和普通操作按钮区分开 */
+    private void stylePrimary(Button b) {
+        b.setBackgroundResource(R.drawable.btn_primary);
+        b.setTextColor(0xFFFFFFFF);
+        b.setTypeface(null, android.graphics.Typeface.BOLD);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+    }
+
+    /** 一排等宽按钮，间距一致；电视上竖排按钮容易"看不清点哪个"，等宽更整齐 */
+    private void addButtons(LinearLayout row, Button[] buttons) {
+        for (Button b : buttons) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, dp(46), 1f);
+            lp.setMargins(dp(5), 0, dp(5), 0);
+            row.addView(b, lp);
+        }
+    }
+
+    /** 页内标题：主标题加粗大号 + 旁边一行小字说明 */
+    private void styleTitle(TextView tv, String main, String sub) {
+        android.text.SpannableStringBuilder sb =
+                new android.text.SpannableStringBuilder(main + "\n" + sub);
+        sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                0, main.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new android.text.style.RelativeSizeSpan(0.58f),
+                main.length() + 1, sb.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        sb.setSpan(new android.text.style.ForegroundColorSpan(COLOR_HINT),
+                main.length() + 1, sb.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        tv.setText(sb);
+        tv.setTextColor(COLOR_TEXT);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        tv.setLineSpacing(dp(4), 1f);
+        tv.setPadding(0, 0, 0, dp(2));
     }
 
     private void styleText(TextView tv, int color, int sp) {
@@ -1050,8 +1131,8 @@ public class MainActivity extends Activity {
             if (convertView == null) {
                 row = new LinearLayout(MainActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                int pad = dp(12);
-                row.setPadding(pad, dp(9), pad, dp(9));
+                // 左侧多留 4dp 给选中行的指示条，避免文字压在上面
+                row.setPadding(dp(16), dp(9), dp(14), dp(9));
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 18);
                 tvMain.setSingleLine(true);
@@ -1109,7 +1190,7 @@ public class MainActivity extends Activity {
             if (convertView == null) {
                 row = new LinearLayout(MainActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                row.setPadding(dp(12), dp(9), dp(12), dp(9));
+                row.setPadding(dp(16), dp(9), dp(14), dp(9));
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 20);
                 tvMain.setSingleLine(true);

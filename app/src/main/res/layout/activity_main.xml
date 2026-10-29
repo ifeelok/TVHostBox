@@ -2,43 +2,110 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:background="#0B111C">
 
-    <!-- 顶部导航 -->
+    <!-- ===== 顶栏：品牌 + root 状态 ===== -->
+    <LinearLayout
+        android:id="@+id/top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="22dp"
+        android:paddingEnd="22dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:background="@drawable/bg_logo"
+            android:gravity="center"
+            android:text="H"
+            android:textColor="#08131F"
+            android:textSize="19sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="11dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="电视Host管家"
+                android:textColor="#E8EDF6"
+                android:textSize="19sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="hosts 管理 · 手机配置 · Cloudflare 优选"
+                android:textColor="#7E8CA3"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/root_pill"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_pill_neutral"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:text="正在检测 root …"
+            android:textColor="#93A1B8"
+            android:textSize="13sp" />
+    </LinearLayout>
+
+    <!-- ===== 页签 ===== -->
     <LinearLayout
         android:id="@+id/nav_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:background="#0A0F1A"
-        android:padding="8dp">
+        android:paddingStart="17dp"
+        android:paddingEnd="17dp"
+        android:paddingBottom="12dp">
 
         <Button
             android:id="@+id/nav_hosts"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="46dp"
             android:layout_weight="1"
-            android:layout_margin="6dp"
+            android:layout_marginStart="5dp"
+            android:layout_marginEnd="5dp"
+            android:stateListAnimator="@null"
             android:text="Hosts 管理"
-            android:textSize="20sp" />
+            android:textSize="17sp" />
 
         <Button
             android:id="@+id/nav_qr"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="46dp"
             android:layout_weight="1"
-            android:layout_margin="6dp"
+            android:layout_marginStart="5dp"
+            android:layout_marginEnd="5dp"
+            android:stateListAnimator="@null"
             android:text="扫码配置"
-            android:textSize="20sp" />
+            android:textSize="17sp" />
 
         <Button
             android:id="@+id/nav_cf"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="46dp"
             android:layout_weight="1"
-            android:layout_margin="6dp"
+            android:layout_marginStart="5dp"
+            android:layout_marginEnd="5dp"
+            android:stateListAnimator="@null"
             android:text="CF 优选"
-            android:textSize="20sp" />
+            android:textSize="17sp" />
     </LinearLayout>
 
     <!-- 内容区：由代码动态填充 -->
