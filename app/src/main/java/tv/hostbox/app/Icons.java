@@ -30,6 +30,12 @@ public final class Icons {
     public static final String LIST = "list";
     public static final String PHONE = "phone";
     public static final String INFO = "info";
+    public static final String CHECK = "check";
+    public static final String ALERT = "alert";
+    public static final String CHEVRON = "chevron";
+    public static final String DOT = "dot";
+    public static final String WIFI = "wifi";
+    public static final String PENCIL = "pencil";
 
     /** @param sizeDp 图标视觉尺寸（dp）；@param color ARGB 颜色 */
     public static Drawable drawable(Context c, String kind, int sizeDp, int color) {
@@ -105,6 +111,43 @@ public final class Icons {
             cv.drawCircle(12, 12, 8.4f, p);
             cv.drawCircle(12, 7.8f, 1.15f, fill);
             cv.drawLine(12, 11.2f, 12, 16.6f, p);
+        } else if (CHECK.equals(kind)) {
+            // 状态「可用」：对勾比文字 ✔ 更像界面元素（也不会因字体缺失变成豆腐块）
+            path.moveTo(4.6f, 12.4f);
+            path.lineTo(9.4f, 17.2f);
+            path.lineTo(19.2f, 6.8f);
+            cv.drawPath(path, p);
+        } else if (ALERT.equals(kind)) {
+            // 状态「异常」：三角 + 感叹号
+            path.moveTo(12, 3.4f);
+            path.lineTo(21.4f, 19.6f);
+            path.lineTo(2.6f, 19.6f);
+            path.close();
+            cv.drawPath(path, p);
+            cv.drawLine(12, 9.4f, 12, 14.2f, p);
+            cv.drawCircle(12, 16.9f, 1.15f, fill);
+        } else if (CHEVRON.equals(kind)) {
+            // 行尾「可进入」提示，只在光标所在行出现
+            path.moveTo(9.6f, 5.4f);
+            path.lineTo(16.2f, 12f);
+            path.lineTo(9.6f, 18.6f);
+            cv.drawPath(path, p);
+        } else if (DOT.equals(kind)) {
+            cv.drawCircle(12, 12, 4.2f, fill);
+        } else if (WIFI.equals(kind)) {
+            // 三段弧 + 圆点：家庭网络场景里"连同一个 Wi-Fi"用图形说更省字
+            cv.drawArc(new RectF(2.4f, 5.2f, 21.6f, 24.4f), 215, 110, false, p);
+            cv.drawArc(new RectF(6.2f, 9.0f, 17.8f, 20.6f), 215, 110, false, p);
+            cv.drawArc(new RectF(10.0f, 12.8f, 14.0f, 16.8f), 215, 110, false, p);
+            cv.drawCircle(12, 19.4f, 1.5f, fill);
+        } else if (PENCIL.equals(kind)) {
+            path.moveTo(5.2f, 18.8f);
+            path.lineTo(6.4f, 14.2f);
+            path.lineTo(16.2f, 4.4f);
+            path.lineTo(19.6f, 7.8f);
+            path.lineTo(9.8f, 17.6f);
+            path.close();
+            cv.drawPath(path, p);
         }
         return new BitmapDrawable(c.getResources(), bmp);
     }

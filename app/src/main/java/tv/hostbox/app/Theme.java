@@ -107,6 +107,31 @@ public final class Theme {
         return out;
     }
 
+    /**
+     * 两色混合：t=0 取 a，t=1 取 b。
+     * 用来从现有调色板派生「卡片顶部微亮」「按下态」等中间色，
+     * 避免为每套主题再加一堆字段（加字段意味着 6 套主题都要手填，最容易漏）。
+     */
+    public static int mix(int a, int b, float t) {
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF, aa = (a >>> 24);
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF, ba = (b >>> 24);
+        int r = Math.round(ar + (br - ar) * t);
+        int g = Math.round(ag + (bg - ag) * t);
+        int bl = Math.round(ab + (bb - ab) * t);
+        int al = Math.round(aa + (ba - aa) * t);
+        return (al << 24) | (r << 16) | (g << 8) | bl;
+    }
+
+    /** 相对亮度（0~1），用来判断某个色放在某底上够不够亮，别靠眼睛猜 */
+    public static float luma(int color) {
+        float r = ((color >> 16) & 0xFF) / 255f;
+        float g = ((color >> 8) & 0xFF) / 255f;
+        float b = (color & 0xFF) / 255f;
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+
     /** 半透明叠加：给强调色算出「浅底」，比直接调深色更贴合当前主题 */
     public static int alpha(int color, float a) {
         int al = Math.round(255 * a);

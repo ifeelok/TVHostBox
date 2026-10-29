@@ -5,7 +5,10 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.text.SpannableString;
 import android.util.TypedValue;
@@ -54,15 +57,20 @@ public class MainActivity extends Activity {
     /** 记录光标最后停在按钮行的哪一枚：从列表按「下」回到它，而不是每次都从第一个开始 */
     private int lastHostsBtnIdx = 0;
 
-    /** 底部按键提示：内容随焦点位置变化，解决「遥控器不知道现在能按什么」 */
-    private TextView tvHint;
-    private ImageView imgHint;
+    /** 底部按键提示：键帽 + 说明，内容随焦点位置变化，解决「遥控器不知道现在能按什么」 */
+    private LinearLayout hintRow;
+    /** 上一次的提示文案：相同就不重建视图，避免每次焦点变化都重新 inflate 一堆 TextView */
+    private String hintRaw = "";
+
+    /** 行尾箭头（只在光标行出现）：亮块上要用浅色，平时那枚留作占位 */
+    private Drawable chevOn, chevOff;
 
     /** 首次拿到窗口焦点时把焦点放到页签上，只做一次 */
     private boolean initialFocusDone = false;
 
     // Hosts 面板
     private TextView tvRootStatus;
+    private ImageView imgRootIcon;
     private SideList hostsList;
     private TextView tvHostsSummary;
     private TextView tvActionResult; // 持久显示写入/删除/恢复结果（Toast 太快会错过）
@@ -76,6 +84,9 @@ public class MainActivity extends Activity {
     // CF 面板
     private Button btnCfStart;
     private TextView tvCfProgress;
+    private TextView tvCfPhase;
+    private TextView tvCfPct;
+    private Bar barCf;
     private SideList cfList;
     private List<CfOptimizer.Candidate> cfResults = new ArrayList<CfOptimizer.Candidate>();
     private volatile boolean cfRunning = false;
@@ -115,7 +126,8 @@ public class MainActivity extends Activity {
         navHostsBtn = findViewById(R.id.nav_hosts);
         navQrBtn = findViewById(R.id.nav_qr);
         navCfBtn = findViewById(R.id.nav_cf);
-        tvRootStatus = findViewById(R.id.root_pill);
+        tvRootStatus = findViewById(R.id.root_text);
+        imgRootIcon = findViewById(R.id.root_icon);
 
         // 顶栏品牌区跟随主题
         findViewById(R.id.root).setBackgroundColor(th.bg);
@@ -125,16 +137,16 @@ public class MainActivity extends Activity {
         ((TextView) findViewById(R.id.brand_title)).setTextColor(th.text);
         ((TextView) findViewById(R.id.brand_sub)).setTextColor(th.hint);
         tvRootStatus.setTextColor(th.hint);
-        tvRootStatus.setBackground(Skin.pill(th, th.hint));
+        findViewById(R.id.root_pill).setBackground(Skin.pill(th, th.hint));
+        imgRootIcon.setImageDrawable(Icons.drawable(this, Icons.DOT, 14, th.hint));
 
         findViewById(R.id.hair_line).setBackground(Skin.hairline(th));
 
-        // 底部按键提示：图标 + 一行说明
-        tvHint = findViewById(R.id.hint_text);
-        imgHint = findViewById(R.id.hint_icon);
-        tvHint.setTextColor(th.hint);
-        imgHint.setImageDrawable(Icons.drawable(this, Icons.INFO, 15, Theme.alpha(th.hint, 0.85f)));
-        setHint("←→ 切换页签 · ↓ 进入内容 · OK 执行");
+        // 底部按键提示：键帽 + 说明，遥控器不用猜现在能按什么
+        hintRow = findViewById(R.id.hint_row);
+        setHint("←→ 切换页签 · ↓ 进入内容 · OK 选中");
+        chevOn = Icons.drawable(this, Icons.CHEVRON, 18, Theme.alpha(th.onFocus, 0.9f));
+        chevOff = Icons.drawable(this, Icons.CHEVRON, 18, th.hint);
 
         // 页签文字色要随「是否有光标」翻转，统一在这里挂钩
         View.OnFocusChangeListener navFocus = new View.OnFocusChangeListener() {
@@ -296,10 +308,78 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 底部提示条文案 */
+    /**
+     * 底部提示条文案。
+     *
+     * 输入是一句用「·」分段的话，例如 "OK 进入列表 · ↑ 回页签"：
+     * 每段开头的按键名（OK / ↑↓ / 返回 …）会被画成一个**键帽**，后面才是说明文字。
+     * 这样一屏里"能按什么键"和"按了干什么"是两种视觉元素，扫一眼就能分清；
+     * 以前一整行灰字，3 米外基本等于没写。
+     */
     private void setHint(String text) {
-        if (tvHint == null) return;
-        if (text != null && !text.contentEquals(tvHint.getText())) tvHint.setText(text);
+        if (hintRow == null || text == null) return;
+        if (text.equals(hintRaw)) return;
+        hintRaw = text;
+        hintRow.removeAllViews();
+
+        String[] segs = text.split("\\s*·\\s*");
+        int group = 0;
+        for (String raw : segs) {
+            String seg = raw.trim();
+            if (seg.isEmpty()) continue;
+            String key = null;
+            String label = seg;
+            int sp = seg.indexOf(' ');
+            if (sp > 0) {
+                String head = seg.substring(0, sp);
+                if (KEY_TOKENS.contains(head)) {
+                    key = head;
+                    label = seg.substring(sp + 1).trim();
+                }
+            } else if (KEY_TOKENS.contains(seg)) {
+                key = seg;
+                label = "";
+            }
+            if (key != null) hintRow.addView(newKeyCap(key, group == 0));
+            if (!label.isEmpty()) hintRow.addView(newHintLabel(label, group == segs.length - 1));
+            group++;
+        }
+    }
+
+    /** 提示条里认识的按键名；只有它们会被画成键帽，其余整段当普通说明 */
+    private static final java.util.HashSet<String> KEY_TOKENS =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "OK", "BACK", "返回", "菜单", "↑", "↓", "←", "→", "←→", "↑↓"));
+
+    private View newKeyCap(String key, boolean first) {
+        TextView tv = new TextView(this);
+        tv.setText(key);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        tv.setTextColor(th.text);
+        tv.setLetterSpacing(0.04f);
+        tv.setBackground(Skin.keycap(th));
+        tv.setPadding(dp(8), dp(2), dp(8), dp(2));
+        tv.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(first ? 0 : dp(18), 0, dp(7), 0);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
+    private View newHintLabel(String label, boolean last) {
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tv.setTextColor(th.hint);
+        tv.setSingleLine(true);
+        tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, 0, last ? 0 : dp(12), 0);
+        tv.setLayoutParams(lp);
+        return tv;
     }
 
     /** 内容区按左右键也能切页签（和页签栏行为一致），焦点跟着回到页签上 */
@@ -363,14 +443,14 @@ public class MainActivity extends Activity {
         if (!(v instanceof TextView)) return;
         TextView tv = (TextView) v;
         tv.setAllCaps(false);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         tv.setTypeface(null, active ? android.graphics.Typeface.BOLD
                 : android.graphics.Typeface.NORMAL);
         tv.setBackground(Skin.tab(th, active));
         if (tv.isFocused()) {
             tv.setTextColor(COLOR_ON_FOCUS);        // 光标在这儿：亮块 + 深色字
         } else if (active) {
-            tv.setTextColor(COLOR_ON_ACCENT);       // 当前页：强调色底 + 深色字
+            tv.setTextColor(COLOR_ACCENT);          // 当前页：淡强调底 + 强调色字
         } else {
             tv.setTextColor(COLOR_HINT);
         }
@@ -408,53 +488,62 @@ public class MainActivity extends Activity {
     private LinearLayout buildHostsPanel() {
         LinearLayout root = verticalPanel();
 
+        // 标题 + 统计胶囊同行：540dp 高的盒子上，省下这一行就能多显示一条 hosts
         TextView title = new TextView(this);
-        styleTitle(title, "Hosts 条目", "OK 进入列表逐条操作 · 每次改动前自动备份");
+        styleTitle(title, "Hosts 条目", "OK 进入列表逐条操作，每次改动前自动备份");
+        title.setPadding(0, 0, 0, dp(2));
 
         tvHostsSummary = new TextView(this);
-        styleText(tvHostsSummary, COLOR_HINT, 13);
-        tvHostsSummary.setGravity(Gravity.END);
-        tvHostsSummary.setPadding(dp(10), 0, 0, dp(6));
+        styleText(tvHostsSummary, COLOR_HINT, 12);
+        tvHostsSummary.setGravity(Gravity.CENTER);
+        tvHostsSummary.setBackground(Skin.pill(th, th.hint));
+        tvHostsSummary.setPadding(dp(12), dp(5), dp(12), dp(5));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.BOTTOM);
+        head.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams lpSum = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpSum.setMargins(dp(12), 0, 0, dp(8));
+        head.addView(tvHostsSummary, lpSum);
 
         hostsList = new HostsSideList();
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lp.topMargin = dp(10);
+        lp.topMargin = dp(12);
         hostsList.setLayoutParams(lp);
 
-        // 操作结果持久显示（Toast 在电视上太短暂）
+        // 操作结果持久显示（Toast 在电视上太短暂），样式上给一块底，和正文区分开
         tvActionResult = new TextView(this);
         styleText(tvActionResult, COLOR_HINT, 13);
-        tvActionResult.setPadding(dp(4), dp(6), dp(2), 0);
         tvActionResult.setVisibility(View.GONE);
+        LinearLayout.LayoutParams lpRes = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRes.topMargin = dp(10);
+        tvActionResult.setLayoutParams(lpRes);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
-        btnHostsRefresh = actionButton("刷新", Icons.REFRESH, new View.OnClickListener() {
-            @Override public void onClick(View v) { loadHostsAsync(); }
-        });
         Button btnAdd = actionButton("添加条目", Icons.PLUS, new View.OnClickListener() {
             @Override public void onClick(View v) { showAddDialog(); }
         });
+        // 一行里只留一个"主按钮"：加条目是这一页最高频的操作，用强调色把它抬出来
+        stylePrimary(btnAdd);
         btnHostsAdd = btnAdd;
+        btnHostsRefresh = actionButton("刷新", Icons.REFRESH, new View.OnClickListener() {
+            @Override public void onClick(View v) { loadHostsAsync(); }
+        });
         Button btnBackup = actionButton("备份", Icons.CLOCK, new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
         });
         Button btnSettings = actionButton("设置", Icons.SLIDERS, new View.OnClickListener() {
             @Override public void onClick(View v) { showSettingsDialog(); }
         });
-        hostsButtonRow = new Button[]{btnHostsRefresh, btnAdd, btnBackup, btnSettings};
+        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings};
         addButtons(buttons, hostsButtonRow);
         wireButtonRow(hostsButtonRow, hostsList);
-
-        // 标题与统计放同一行：窄屏（540dp 高）上能多留一行给列表
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.BOTTOM);
-        title.setPadding(0, 0, 0, dp(2));
-        head.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        head.addView(tvHostsSummary);
 
         root.addView(head);
         root.addView(hostsList);
@@ -495,14 +584,24 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (tvRootStatus == null) return;
-                        tvRootStatus.setText(ok ? "✔ root 可用" : "✘ 未获取 root");
-                        tvRootStatus.setTextColor(ok ? COLOR_OK : COLOR_DANGER);
-                        tvRootStatus.setBackground(Skin.pill(th, ok ? COLOR_OK : COLOR_DANGER));
+                        setRootState(ok);
                         if (!ok) toast("未获取 root，写入/删除不可用");
                     }
                 });
             }
         }, "check-root").start();
+    }
+
+    /**
+     * 顶栏 root 状态：图标（对勾/警告）+ 文字 + 颜色，三重编码。
+     * 只靠颜色的话，红绿色弱用户、或者电视色彩设置偏了的时候就看不出区别。
+     */
+    private void setRootState(boolean ok) {
+        int c = ok ? COLOR_OK : COLOR_DANGER;
+        tvRootStatus.setText(ok ? "root 可用" : "未获取 root");
+        tvRootStatus.setTextColor(c);
+        findViewById(R.id.root_pill).setBackground(Skin.pill(th, c));
+        imgRootIcon.setImageDrawable(Icons.drawable(this, ok ? Icons.CHECK : Icons.ALERT, 14, c));
     }
 
     /**
@@ -539,6 +638,7 @@ public class MainActivity extends Activity {
                 dlg.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
             }
         });
+        styleDialog(dlg);
         dlg.show();
     }
 
@@ -550,7 +650,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         showActionResult(err == null,
-                                err == null ? "✔ 已删除 " + domain : "✘ 删除失败：" + err);
+                                err == null ? "已删除 " + domain : "删除失败：" + err);
                         loadHostsAsync();
                         if (hostsList != null) hostsList.focusEntered();
                     }
@@ -559,11 +659,13 @@ public class MainActivity extends Activity {
         }, "remove-host").start();
     }
 
-    /** 操作结果持久显示在列表下方（成功绿/失败红），同时配一个 Toast */
+    /** 操作结果持久显示在列表下方（成功绿/失败红 + 明确措辞，不只靠颜色） */
     private void showActionResult(boolean ok, String msg) {
         if (tvActionResult != null) {
             tvActionResult.setText(msg);
             tvActionResult.setTextColor(ok ? COLOR_OK : COLOR_DANGER);
+            tvActionResult.setBackground(Skin.strip(th));
+            tvActionResult.setPadding(dp(12), dp(8), dp(12), dp(8));
             tvActionResult.setVisibility(View.VISIBLE);
         }
         toast(msg);
@@ -596,6 +698,7 @@ public class MainActivity extends Activity {
                 .setPositiveButton("写入", null) // 点击行为在 show() 后拦截，校验失败不关闭
                 .setNegativeButton("取消", null)
                 .create();
+        styleDialog(dlg);
         dlg.show();
         // IP 已预填时焦点直接落在域名上，省一次按键；否则光标停在 IP 上从头填
         if (prefillIp != null && !prefillIp.isEmpty()) etDomain.requestFocus();
@@ -620,8 +723,8 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         showActionResult(err == null,
-                                err == null ? "✔ 写入成功 " + domain + " → " + ip + "（原文件已备份）"
-                                        : "✘ 写入失败：" + err);
+                                err == null ? "写入成功：" + domain + " → " + ip + "（原文件已备份）"
+                                        : "写入失败：" + err);
                         loadHostsAsync();
                         if (hostsList != null) hostsList.focusEntered();
                     }
@@ -672,11 +775,55 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    /** 对话框也跟主题走：浅色主题用浅色对话框，否则会突然弹出一块黑色 */
+    /**
+     * 对话框也跟主题走：浅色主题用浅色对话框，深色主题用深色；
+     * 并在 show 之后把窗口底和文字色都换成当前调色板——否则会突然弹出一块 Material 灰，
+     * 在一整套自绘界面里像是别的 App 弹出来的。
+     */
     private AlertDialog.Builder newDialog() {
+        // Builder 没有 setOnShowListener，这里覆写 show() 统一接管样式，
+        // 这样所有 newDialog().setTitle(...).show() 的老写法都不用改
         return new AlertDialog.Builder(this, th.light
                 ? android.R.style.Theme_Material_Light_Dialog_Alert
-                : android.R.style.Theme_Material_Dialog_Alert);
+                : android.R.style.Theme_Material_Dialog_Alert) {
+            @Override public AlertDialog show() {
+                AlertDialog d = super.show();
+                styleDialog(d);
+                return d;
+            }
+        };
+    }
+
+    private void styleDialog(AlertDialog dlg) {
+        android.view.Window w = dlg.getWindow();
+        if (w == null) return;
+        w.setBackgroundDrawable(Skin.dialog(th));
+        android.view.WindowManager.LayoutParams lp = w.getAttributes();
+        lp.dimAmount = 0.62f;
+        w.setAttributes(lp);
+        tintDialogText(w.getDecorView());
+    }
+
+    /** 统一弹窗里的文字：正文用主文字色，底部按钮用强调色（和页内主按钮同一套视觉语言） */
+    private void tintDialogText(View v) {
+        if (v instanceof EditText) {
+            EditText et = (EditText) v;
+            et.setTextColor(COLOR_TEXT);
+            et.setHintTextColor(COLOR_HINT);
+            return;
+        }
+        if (v instanceof Button) {
+            ((Button) v).setTextColor(COLOR_ACCENT);
+            ((Button) v).setAllCaps(false);
+            return;
+        }
+        if (v instanceof TextView) {
+            ((TextView) v).setTextColor(COLOR_TEXT);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) tintDialogText(g.getChildAt(i));
+        }
     }
 
     private String appVersion() {
@@ -741,6 +888,7 @@ public class MainActivity extends Activity {
                 }
             }
         });
+        styleDialog(dlg);
         dlg.show();
     }
 
@@ -785,8 +933,8 @@ public class MainActivity extends Activity {
                                                 runOnUiThread(new Runnable() {
                                                     @Override public void run() {
                                                         showActionResult(err == null,
-                                                                err == null ? "✔ 已恢复 " + name
-                                                                        : "✘ 恢复失败：" + err);
+                                                                err == null ? "已恢复 " + name
+                                                                        : "恢复失败：" + err);
                                                         loadHostsAsync();
                                                     }
                                                 });
@@ -809,40 +957,92 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         styleTitle(title, "扫码配置", "手机与盒子连同一个 Wi-Fi，扫码后在网页里增删条目");
+        title.setPadding(0, 0, 0, dp(2));
 
-        imgQr = new ImageView(this);
-        // 按屏幕宽度自适应，避免低分辨率/小屏盒子溢出（不超过屏宽 42%）
-        int qrSide = (int) Math.min(dp(280),
-                getResources().getDisplayMetrics().widthPixels * 0.42f);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
-        lp.gravity = Gravity.CENTER_HORIZONTAL;
-        lp.topMargin = dp(14);
-        imgQr.setLayoutParams(lp);
-        imgQr.setBackground(Skin.qrFrame(th));
-        imgQr.setPadding(dp(10), dp(10), dp(10), dp(10));
-
-        tvQrUrl = new TextView(this);
-        styleText(tvQrUrl, COLOR_ACCENT, 21);
-        tvQrUrl.setGravity(Gravity.CENTER_HORIZONTAL);
-        tvQrUrl.setTypeface(android.graphics.Typeface.MONOSPACE);
-        tvQrUrl.setPadding(0, dp(12), 0, dp(4));
-
+        // 服务状态挪到标题右侧：既省一行高度，又和 hosts 页的"统计胶囊"位置统一
         tvServerStatus = new TextView(this);
-        styleText(tvServerStatus, COLOR_HINT, 13);
+        styleText(tvServerStatus, COLOR_HINT, 12);
         tvServerStatus.setGravity(Gravity.CENTER);
         tvServerStatus.setBackground(Skin.pill(th, th.hint));
-        tvServerStatus.setPadding(dp(14), dp(6), dp(14), dp(6));
+        tvServerStatus.setPadding(dp(12), dp(6), dp(12), dp(6));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.BOTTOM);
+        head.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         LinearLayout.LayoutParams lpStatus = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lpStatus.gravity = Gravity.CENTER_HORIZONTAL;
-        lpStatus.topMargin = dp(8);
-        tvServerStatus.setLayoutParams(lpStatus);
+        lpStatus.setMargins(dp(12), 0, 0, dp(8));
+        head.addView(tvServerStatus, lpStatus);
+
+        imgQr = new ImageView(this);
+        // 尺寸跟着"内容区实际可用高度"走：540dp 高的盒子上，卡片里还要放网址，不能再撑到 280dp
+        int qrSide = (int) Math.min(dp(160),
+                getResources().getDisplayMetrics().widthPixels * 0.21f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
+        lp.gravity = Gravity.CENTER_HORIZONTAL;
+        imgQr.setLayoutParams(lp);
+        imgQr.setBackground(Skin.qrFrame(th));
+        imgQr.setPadding(dp(9), dp(9), dp(9), dp(9));
+
+        tvQrUrl = new TextView(this);
+        styleText(tvQrUrl, COLOR_ACCENT, 15);
+        tvQrUrl.setGravity(Gravity.CENTER_HORIZONTAL);
+        tvQrUrl.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tvQrUrl.setPadding(0, dp(8), 0, 0);
+
+        // 左：二维码卡（竖排居中）；右：三步说明 —— 16:9 上左右分栏比一根竖条更平衡
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setBackground(Skin.card(th));
+        card.setPadding(dp(16), dp(12), dp(16), dp(12));
+        card.addView(imgQr);
+        card.addView(tvQrUrl);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lpBody = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lpBody.topMargin = dp(12);
+        body.setLayoutParams(lpBody);
+        LinearLayout.LayoutParams lpCard = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        body.addView(card, lpCard);
+
+        LinearLayout tips = new LinearLayout(this);
+        tips.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lpT = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+        lpT.setMargins(dp(20), 0, 0, 0);
+        tips.setLayoutParams(lpT);
+
+        tips.addView(stepRow("1", "手机连上同一个 Wi-Fi", "和盒子在同一个路由器下即可，不用装任何 App"));
+        tips.addView(stepRow("2", "扫码打开配置页", "相机扫左侧二维码，或在浏览器里输入上面的网址"));
+        tips.addView(stepRow("3", "增删条目，即时生效", "保存后电视这边会提示「手机端已更新 hosts」"));
+
+        View spacer = new View(this);
+        tips.addView(spacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        TextView note = new TextView(this);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        note.setTextColor(COLOR_HINT);
+        note.setLineSpacing(dp(3), 1f);
+        note.setText("每次写入都会先备份原 hosts，误删可在「备份」里一键恢复。");
+        note.setBackground(Skin.strip(th));
+        note.setPadding(dp(14), dp(9), dp(14), dp(9));
+        tips.addView(note, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        body.addView(tips);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.CENTER_HORIZONTAL);
         LinearLayout.LayoutParams lpBtnRow = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lpBtnRow.topMargin = dp(10);
+        lpBtnRow.topMargin = dp(12);
         buttons.setLayoutParams(lpBtnRow);
         btnQrRefresh = actionButton("刷新二维码", Icons.REFRESH, new View.OnClickListener() {
             @Override public void onClick(View v) { refreshQr(); }
@@ -862,24 +1062,54 @@ public class MainActivity extends Activity {
         // 这一页没有列表，按「上」直接回页签
         wireButtonRow(row, navQrBtn);
 
-        // 二维码 / 网址 / 服务状态装进一张卡片里居中，比三块散着放整齐
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setGravity(Gravity.CENTER);
-        card.setBackground(Skin.card(th));
-        card.setPadding(dp(22), dp(10), dp(22), dp(18));
-        card.addView(imgQr);
-        card.addView(tvQrUrl);
-        card.addView(tvServerStatus);
-        LinearLayout.LayoutParams lpCard = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lpCard.topMargin = dp(12);
-        card.setLayoutParams(lpCard);
-
-        root.addView(title);
-        root.addView(card);
+        root.addView(head);
+        root.addView(body);
         root.addView(buttons);
         return root;
+    }
+
+    /** 扫码页的一步：圆形序号 + 主文案 + 补充说明 */
+    private View stepRow(String no, String main, String sub) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.TOP);
+        LinearLayout.LayoutParams lpRow = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRow.bottomMargin = dp(12);
+        row.setLayoutParams(lpRow);
+
+        TextView num = new TextView(this);
+        num.setText(no);
+        num.setGravity(Gravity.CENTER);
+        num.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        num.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        num.setTextColor(COLOR_ACCENT);
+        num.setBackground(Skin.stepDot(th));
+        row.addView(num, new LinearLayout.LayoutParams(dp(28), dp(28)));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lpCol = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lpCol.setMargins(dp(11), 0, 0, 0);
+        col.setLayoutParams(lpCol);
+
+        TextView tvMain = new TextView(this);
+        tvMain.setText(main);
+        tvMain.setTextColor(COLOR_TEXT);
+        tvMain.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        tvMain.setPadding(0, dp(3), 0, 0);
+
+        TextView tvSub = new TextView(this);
+        tvSub.setText(sub);
+        tvSub.setTextColor(COLOR_HINT);
+        tvSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tvSub.setLineSpacing(dp(2), 1f);
+
+        col.addView(tvMain);
+        col.addView(tvSub);
+        row.addView(col);
+        return row;
     }
 
     private void startServer() {
@@ -906,8 +1136,8 @@ public class MainActivity extends Activity {
         boolean running = ConfigServer.isRunning();
         if (tvServerStatus != null) {
             tvServerStatus.setText(running
-                    ? "✔ 配置服务运行中 · 手机需与盒子连同一个 Wi-Fi"
-                    : "✘ 配置服务已停止 · 先点「启动服务」再扫码");
+                    ? "配置服务运行中 · 手机需与盒子连同一个 Wi-Fi"
+                    : "配置服务已停止 · 先启动服务再扫码");
             tvServerStatus.setTextColor(running ? COLOR_OK : COLOR_DANGER);
             tvServerStatus.setBackground(Skin.pill(th, running ? COLOR_OK : COLOR_DANGER));
         }
@@ -960,38 +1190,114 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         styleTitle(title, "Cloudflare 优选", "从官方网段采样 → 延迟测试 → 下载测速，挑出最快的几个 IP");
+        title.setPadding(0, 0, 0, dp(2));
 
-        btnCfStart = actionButton("开始优选（延迟 + 下载测速）", Icons.PLAY, new View.OnClickListener() {
+        btnCfStart = actionButton("开始优选", Icons.PLAY, new View.OnClickListener() {
             @Override public void onClick(View v) { startCfOptimize(); }
         });
         stylePrimary(btnCfStart);
-        LinearLayout.LayoutParams lpStart = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(50));
-        lpStart.topMargin = dp(10);
-        btnCfStart.setLayoutParams(lpStart);
 
-        tvCfProgress = new TextView(this);
-        styleText(tvCfProgress, COLOR_HINT, 14);
-        tvCfProgress.setLineSpacing(dp(3), 1f);
-        tvCfProgress.setBackground(Skin.card(th));
-        tvCfProgress.setPadding(dp(14), dp(10), dp(14), dp(10));
-        tvCfProgress.setText("对 Cloudflare 网段采样 → TCP 443 延迟测试 → 下载测速。\n完成后选中某条按 OK 应用到域名（参数在 hosts 页「设置」里调）。");
+        // 标题和主按钮并排：省下一整行给结果列表（540dp 高的盒子上这行很值钱）
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.BOTTOM);
+        head.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams lpStart = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(52));
+        lpStart.setMargins(dp(16), 0, 0, dp(6));
+        head.addView(btnCfStart, lpStart);
+
+        // 进度卡：阶段名 + 百分比 + 进度条 + 细节。原来只有一行 "延迟 12/320"，
+        // 3 米外根本判断不出"还要等多久"，进度条是电视上最省认知的一眼信息。
+        LinearLayout progCard = new LinearLayout(this);
+        progCard.setOrientation(LinearLayout.VERTICAL);
+        progCard.setBackground(Skin.card(th));
+        progCard.setPadding(dp(16), dp(12), dp(16), dp(12));
         LinearLayout.LayoutParams lpProg = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lpProg.topMargin = dp(10);
-        tvCfProgress.setLayoutParams(lpProg);
+        lpProg.topMargin = dp(12);
+        progCard.setLayoutParams(lpProg);
+
+        LinearLayout progHead = new LinearLayout(this);
+        progHead.setOrientation(LinearLayout.HORIZONTAL);
+        progHead.setGravity(Gravity.CENTER_VERTICAL);
+
+        tvCfPhase = new TextView(this);
+        tvCfPhase.setText("尚未开始");
+        tvCfPhase.setTextColor(COLOR_TEXT);
+        tvCfPhase.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        tvCfPhase.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+
+        tvCfPct = new TextView(this);
+        tvCfPct.setText("—");
+        tvCfPct.setTextColor(COLOR_HINT);
+        tvCfPct.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvCfPct.setTypeface(android.graphics.Typeface.MONOSPACE);
+        tvCfPct.setGravity(Gravity.END);
+
+        progHead.addView(tvCfPhase, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        progHead.addView(tvCfPct, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        progCard.addView(progHead);
+
+        barCf = new Bar(this, Theme.alpha(th.border, 0.9f), COLOR_ACCENT);
+        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(6));
+        lpBar.topMargin = dp(10);
+        progCard.addView(barCf, lpBar);
+
+        tvCfProgress = new TextView(this);
+        styleText(tvCfProgress, COLOR_HINT, 12);
+        tvCfProgress.setLineSpacing(dp(3), 1f);
+        tvCfProgress.setText("点右上「开始优选」开始。完成后在下方结果里选一条按 OK，即可写进指定域名的 hosts。");
+        LinearLayout.LayoutParams lpDet = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpDet.topMargin = dp(8);
+        progCard.addView(tvCfProgress, lpDet);
 
         cfList = new CfSideList();
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lp.topMargin = dp(10);
+        lp.topMargin = dp(12);
         cfList.setLayoutParams(lp);
 
-        root.addView(title);
-        root.addView(btnCfStart);
-        root.addView(tvCfProgress);
+        root.addView(head);
+        root.addView(progCard);
         root.addView(cfList);
         return root;
+    }
+
+    /** 极简进度条：6dp 圆角轨道 + 强调色填充，比一行数字更直观 */
+    private static class Bar extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int trackColor;
+        private final int fillColor;
+        private float progress = 0f;
+
+        Bar(Context c, int trackColor, int fillColor) {
+            super(c);
+            this.trackColor = trackColor;
+            this.fillColor = fillColor;
+        }
+
+        void setProgress(float p) {
+            this.progress = Math.max(0f, Math.min(1f, p));
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float r = h / 2f;
+            paint.setColor(trackColor);
+            canvas.drawRoundRect(0, 0, w, h, r, r, paint);
+            if (progress > 0f) {
+                paint.setColor(fillColor);
+                canvas.drawRoundRect(0, 0, Math.max(h, w * progress), h, r, r, paint);
+            }
+        }
     }
 
     private void startCfOptimize() {
@@ -1005,6 +1311,9 @@ public class MainActivity extends Activity {
         setBtnText(btnCfStart, "取消优选");
         cfResults.clear();
         if (cfList != null) cfList.resetList();
+        if (tvCfPhase != null) tvCfPhase.setText("采样网段");
+        if (tvCfPct != null) tvCfPct.setText("0%");
+        if (barCf != null) barCf.setProgress(0f);
 
         // 设置里的 CF 参数
         int topN = prefs.getInt(PREF_CF_TOPN, 8);
@@ -1020,10 +1329,16 @@ public class MainActivity extends Activity {
                         @Override public void onProgress(final String phase, final int done, final int total, final String detail) {
                             runOnUiThread(new Runnable() {
                                 @Override public void run() {
-                                    String label = phase.equals("sample") ? "采样" :
-                                            phase.equals("latency") ? "延迟" :
-                                            phase.equals("speed") ? "测速" : "完成";
-                                    tvCfProgress.setText("[" + label + " " + done + "/" + total + "] " + detail);
+                                    String label = phase.equals("sample") ? "采样网段" :
+                                            phase.equals("latency") ? "延迟测试" :
+                                            phase.equals("speed") ? "下载测速" : "已完成";
+                                    float f = overallProgress(phase, done, total);
+                                    if (tvCfPhase != null) tvCfPhase.setText(label);
+                                    if (tvCfPct != null) {
+                                        tvCfPct.setText(Math.round(f * 100) + "%   " + done + "/" + total);
+                                    }
+                                    if (barCf != null) barCf.setProgress(f);
+                                    tvCfProgress.setText(detail);
                                 }
                             });
                         }
@@ -1033,8 +1348,10 @@ public class MainActivity extends Activity {
                             cfResults.clear();
                             cfResults.addAll(result);
                             if (cfList != null) cfList.resetList();
-                            tvCfProgress.setText("优选完成，共 " + result.size()
-                                    + " 个。选中某条按 OK → 应用为指定域名的 IP");
+                            if (tvCfPhase != null) tvCfPhase.setText(result.isEmpty() ? "没有可用结果" : "优选完成");
+                            if (tvCfPct != null) tvCfPct.setText(result.size() + " 个可用");
+                            if (barCf != null) barCf.setProgress(1f);
+                            tvCfProgress.setText("选中某条按 OK，即可写进指定域名的 hosts。");
                             // 结果出来后焦点直接进列表，少按一次方向键
                             if (!result.isEmpty() && cfList != null) cfList.focusEntered();
                         }
@@ -1042,13 +1359,17 @@ public class MainActivity extends Activity {
                 } catch (final InterruptedException e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            tvCfProgress.setText("已取消优选。");
+                            if (tvCfPhase != null) tvCfPhase.setText("已取消");
+                            if (tvCfPct != null) tvCfPct.setText("—");
+                            tvCfProgress.setText("已取消优选，已完成的进度不会写入 hosts。");
                         }
                     });
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            tvCfProgress.setText("优选失败：" + e);
+                            if (tvCfPhase != null) tvCfPhase.setText("优选失败");
+                            if (tvCfPct != null) tvCfPct.setText("—");
+                            tvCfProgress.setText("失败原因：" + e);
                         }
                     });
                 } finally {
@@ -1057,12 +1378,24 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             btnCfStart.setEnabled(true);
-                            setBtnText(btnCfStart, "开始优选（延迟 + 下载测速）");
+                            setBtnText(btnCfStart, "开始优选");
                         }
                     });
                 }
             }
         }, "cf-optimize").start();
+    }
+
+    /**
+     * 三段任务折算成一条总进度：采样 15% → 延迟 40% → 测速 45%。
+     * 各阶段耗时差很大，直接用 done/total 会让进度条"跳"和"卡"，按权重折算更接近真实等待感。
+     */
+    private float overallProgress(String phase, int done, int total) {
+        float f = total <= 0 ? 0f : Math.min(1f, done / (float) total);
+        if (phase.equals("sample")) return 0.15f * f;
+        if (phase.equals("latency")) return 0.15f + 0.40f * f;
+        if (phase.equals("speed")) return 0.55f + 0.45f * f;
+        return 1f;
     }
 
     private void showApplyDialog(final CfOptimizer.Candidate c) {
@@ -1088,6 +1421,7 @@ public class MainActivity extends Activity {
                 .setPositiveButton("写入", null) // show() 后拦截，校验失败不关闭
                 .setNegativeButton("取消", null)
                 .create();
+        styleDialog(dlg);
         dlg.show();
         // 域名已预填时直接聚焦「写入」，避免遥控器一按 OK 就弹出软键盘挡住半屏
         if (etDomain.getText().toString().trim().isEmpty()) {
@@ -1129,13 +1463,16 @@ public class MainActivity extends Activity {
             chip.setText(d);
             chip.setAllCaps(false);
             chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-            chip.setTextColor(COLOR_ACCENT);
+            chip.setTextColor(COLOR_TEXT);
             chip.setBackground(Skin.button(th));
             chip.setStateListAnimator(null);
-            chip.setOnFocusChangeListener(textFlipper(COLOR_ACCENT));
-            chip.setPadding(dp(10), dp(6), dp(10), dp(6));
+            chip.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            chip.setSingleLine(true);
+            chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            chip.setOnFocusChangeListener(textFlipper(COLOR_TEXT));
+            chip.setPadding(dp(12), 0, dp(12), 0);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(42));
             lp.setMargins(0, dp(2), 0, dp(2));
             chip.setLayoutParams(lp);
             chip.setOnClickListener(new View.OnClickListener() {
@@ -1146,7 +1483,7 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.addView(wrap);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(130));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(140));
         lp.topMargin = dp(6);
         sv.setLayoutParams(lp);
         return sv;
@@ -1155,7 +1492,8 @@ public class MainActivity extends Activity {
     private LinearLayout verticalPanel() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(8), dp(20), dp(16));
+        // 左右边距已经在根布局统一给了 44dp 安全边距，这里只补上下呼吸空间
+        root.setPadding(0, dp(12), 0, dp(4));
         root.setBackgroundColor(COLOR_BG);
         return root;
     }
@@ -1203,7 +1541,7 @@ public class MainActivity extends Activity {
         b.setStateListAnimator(null);
         if (iconKind != null) {
             android.graphics.drawable.Drawable icon =
-                    Icons.drawable(this, iconKind, 17, COLOR_HINT);
+                    Icons.drawable(this, iconKind, 18, COLOR_HINT);
             b.setTag(icon);
             b.setText(iconText(icon, text));
         } else {
@@ -1214,7 +1552,7 @@ public class MainActivity extends Activity {
                 Button bb = (Button) v;
                 bb.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_TEXT);
                 tintIcons(bb, hasFocus ? COLOR_ON_FOCUS : COLOR_HINT);
-                if (hasFocus) setHint("OK 执行 · ←→ 换一个按钮");
+                if (hasFocus) setHint("OK 执行 · ←→ 换一个按钮 · ↑ 回列表");
             }
         });
         // 去掉 Button 默认的左右内缩和最小宽度，否则等宽排布时文字会被裁
@@ -1222,10 +1560,9 @@ public class MainActivity extends Activity {
         b.setMinimumWidth(0);
         b.setMinHeight(0);
         b.setMinimumHeight(0);
-        b.setPadding(dp(12), 0, dp(12), 0);
+        b.setPadding(dp(10), 0, dp(10), 0);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(46));
-        lp.setMargins(dp(5), 0, dp(5), 0);
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(52));
         b.setLayoutParams(lp);
         b.setOnClickListener(listener);
         return b;
@@ -1259,35 +1596,41 @@ public class MainActivity extends Activity {
 
     /** 一排等宽按钮，间距一致；电视上竖排按钮容易"看不清点哪个"，等宽更整齐 */
     private void addButtons(LinearLayout row, Button[] buttons) {
-        for (Button b : buttons) {
+        for (int i = 0; i < buttons.length; i++) {
+            Button b = buttons[i];
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    0, dp(46), 1f);
-            lp.setMargins(dp(5), 0, dp(5), 0);
+                    0, dp(52), 1f);
+            // 只在按钮之间留缝，左右边缘与内容区对齐
+            lp.setMargins(i == 0 ? 0 : dp(10), 0, 0, 0);
             row.addView(b, lp);
         }
     }
 
-    /** 页内标题：主标题加粗大号 + 旁边一行小字说明 */
+    /**
+     * 页内标题：主标题 + 一行说明。
+     * 字号只有 4 档（26 / 20 / 16 / 12-13），不再出现 17、18、19、21、22 这种"每处都不一样"的碎片化，
+     * 远看时层级才立得住。
+     */
     private void styleTitle(TextView tv, String main, String sub) {
         android.text.SpannableStringBuilder sb =
                 new android.text.SpannableStringBuilder(main + "\n" + sub);
         sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
                 0, main.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        sb.setSpan(new android.text.style.RelativeSizeSpan(0.58f),
+        sb.setSpan(new android.text.style.RelativeSizeSpan(0.5f),
                 main.length() + 1, sb.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         sb.setSpan(new android.text.style.ForegroundColorSpan(COLOR_HINT),
                 main.length() + 1, sb.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         tv.setText(sb);
         tv.setTextColor(COLOR_TEXT);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
-        tv.setLineSpacing(dp(4), 1f);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        tv.setLineSpacing(dp(6), 1f);
         tv.setPadding(0, 0, 0, dp(2));
     }
 
     private void styleText(TextView tv, int color, int sp) {
         tv.setTextColor(color);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
-        tv.setPadding(0, dp(4), 0, dp(4));
+        tv.setPadding(0, dp(2), 0, dp(2));
     }
 
     private void toast(String msg) {
@@ -1451,14 +1794,20 @@ public class MainActivity extends Activity {
         private void updateHint() {
             if (!hasFocus) return;
             if (entered) {
-                setHint((selPos + 1) + " / " + count()
+                setHint("第 " + (selPos + 1) + " / " + count()
                         + " 条 · ↑↓ 浏览（长按加速）· OK 操作 · 返回 退出列表");
             } else if (count() == 0) {
-                setHint("列表是空的 · 按 OK 添加条目 · ↑ 回页签");
+                setHint(emptyHint());
             } else {
-                setHint("OK 进入列表（共 " + count() + " 条）· ↑ 回页签 · ↓ 直达下方按钮");
+                setHint("OK 进入列表（共 " + count() + " 条）· ↓ 直达按钮 · ↑ " + leaveUpLabel());
             }
         }
+
+        /** 框态按「上」会去哪里：hosts 是回页签，CF 页是回到顶部按钮 */
+        String leaveUpLabel() { return "回页签"; }
+
+        /** 空列表时的提示：两个列表的下一步动作不一样 */
+        String emptyHint() { return "列表是空的 · OK 添加条目 · ↑ 回页签"; }
 
         private void clampSel() {
             int n = count();
@@ -1604,6 +1953,8 @@ public class MainActivity extends Activity {
         }
         @Override void onLeaveUp() { if (btnCfStart != null) btnCfStart.requestFocus(); }
         @Override void onLeaveDown() { if (btnCfStart != null) btnCfStart.requestFocus(); }
+        @Override String leaveUpLabel() { return "回到开始按钮"; }
+        @Override String emptyHint() { return "还没有优选结果 · ↑ 回到开始按钮"; }
     }
 
     // ==================== Adapter ====================
@@ -1615,34 +1966,37 @@ public class MainActivity extends Activity {
         TextView main;
         TextView sub;
         View bar;
+        ImageView chev;
     }
 
     private RowHolder newRowHolder(int mainSp, int subSp) {
         RowHolder h = new RowHolder();
         h.row = new LinearLayout(this);
         h.row.setOrientation(LinearLayout.HORIZONTAL);
+        // 行高下限 60dp：10-foot 场景下 40dp 的行距会让上下两行"粘"在一起
+        h.row.setMinimumHeight(dp(56));
+        h.row.setGravity(Gravity.CENTER_VERTICAL);
 
         h.bar = new View(this);
         LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
-                dp(4), ViewGroup.LayoutParams.MATCH_PARENT);
-        lpBar.setMargins(dp(8), dp(9), dp(10), dp(9));
+                dp(3), dp(34));
+        lpBar.setMargins(dp(9), 0, dp(11), 0);
         h.row.addView(h.bar, lpBar);
 
         // 行首序号：长列表里"第几条"比纯文字更好定位
         h.num = new TextView(this);
         h.num.setGravity(Gravity.CENTER);
-        h.num.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        h.num.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         h.num.setTextColor(COLOR_HINT);
         h.num.setBackground(Skin.badge(th, false));
         h.num.setTypeface(android.graphics.Typeface.MONOSPACE);
         LinearLayout.LayoutParams lpNum = new LinearLayout.LayoutParams(dp(26), dp(26));
-        lpNum.gravity = Gravity.TOP;
-        lpNum.setMargins(0, dp(11), dp(10), 0);
+        lpNum.setMargins(0, 0, dp(11), 0);
         h.row.addView(h.num, lpNum);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(0, dp(9), dp(14), dp(9));
+        content.setPadding(0, dp(8), dp(8), dp(8));
 
         h.main = new TextView(this);
         styleText(h.main, COLOR_TEXT, mainSp);
@@ -1659,6 +2013,14 @@ public class MainActivity extends Activity {
         h.row.addView(content, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
+        // 行尾箭头：只在"光标真正停在这一行"时出现，暗示"按 OK 还有下一步"
+        h.chev = new ImageView(this);
+        h.chev.setImageDrawable(Icons.drawable(this, Icons.CHEVRON, 18, COLOR_HINT));
+        h.chev.setVisibility(View.INVISIBLE);
+        LinearLayout.LayoutParams lpChev = new LinearLayout.LayoutParams(dp(18), dp(18));
+        lpChev.setMargins(0, 0, dp(12), 0);
+        h.row.addView(h.chev, lpChev);
+
         h.row.setTag(h);
         return h;
     }
@@ -1668,14 +2030,15 @@ public class MainActivity extends Activity {
      * 列表没焦点时只用淡强调色底 + 左侧竖条表示"记住的选中项"。
      */
     private void styleRow(RowHolder h, boolean selected, boolean strong, int idleMainColor) {
+        boolean hot = selected && strong;
         if (selected) {
             h.row.setBackground(Skin.row(th, true, strong));
             h.bar.setVisibility(View.VISIBLE);
             h.bar.setBackground(Skin.rowBar(th, true, strong));
-            h.main.setTextColor(strong ? COLOR_ON_FOCUS : COLOR_ACCENT);
-            h.sub.setTextColor(strong ? Theme.alpha(COLOR_ON_FOCUS, 0.72f) : COLOR_HINT);
-            h.num.setBackground(Skin.badge(th, strong));
-            h.num.setTextColor(strong ? COLOR_ON_FOCUS : COLOR_ACCENT);
+            h.main.setTextColor(hot ? COLOR_ON_FOCUS : COLOR_ACCENT);
+            h.sub.setTextColor(hot ? Theme.alpha(COLOR_ON_FOCUS, 0.78f) : COLOR_HINT);
+            h.num.setBackground(Skin.badge(th, hot));
+            h.num.setTextColor(hot ? COLOR_ON_FOCUS : COLOR_ACCENT);
         } else {
             h.row.setBackground(null);
             h.bar.setVisibility(View.INVISIBLE);
@@ -1684,6 +2047,8 @@ public class MainActivity extends Activity {
             h.num.setBackground(Skin.badge(th, false));
             h.num.setTextColor(COLOR_HINT);
         }
+        h.chev.setVisibility(hot ? View.VISIBLE : View.INVISIBLE);
+        h.chev.setImageDrawable(hot ? chevOn : chevOff);
     }
 
 }
