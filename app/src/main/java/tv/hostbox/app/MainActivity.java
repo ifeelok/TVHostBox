@@ -7,6 +7,7 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.text.SpannableString;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -910,7 +911,7 @@ public class MainActivity extends Activity {
             tvServerStatus.setTextColor(running ? COLOR_OK : COLOR_DANGER);
             tvServerStatus.setBackground(Skin.pill(th, running ? COLOR_OK : COLOR_DANGER));
         }
-        if (btnQrService != null) btnQrService.setText(running ? "停止服务" : "启动服务");
+        if (btnQrService != null) setBtnText(btnQrService, running ? "停止服务" : "启动服务");
 
         String ip = getBoxIp();
         if (ip == null) {
@@ -997,11 +998,11 @@ public class MainActivity extends Activity {
         if (cfRunning) {
             // 进行中再按 = 取消
             if (cfOpt != null) cfOpt.cancel();
-            btnCfStart.setText("正在取消…");
+            setBtnText(btnCfStart, "正在取消…");
             return;
         }
         cfRunning = true;
-        btnCfStart.setText("取消优选");
+        setBtnText(btnCfStart, "取消优选");
         cfResults.clear();
         if (cfList != null) cfList.resetList();
 
@@ -1056,7 +1057,7 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             btnCfStart.setEnabled(true);
-                            btnCfStart.setText("开始优选（延迟 + 下载测速）");
+                            setBtnText(btnCfStart, "开始优选（延迟 + 下载测速）");
                         }
                     });
                 }
@@ -1174,19 +1175,39 @@ public class MainActivity extends Activity {
         return actionButton(text, null, listener);
     }
 
+    /** 图标 + 文字的 Spannable：ImageSpan 让图标真正跟着文字居中（compound drawable 会贴边） */
+    private static CharSequence iconText(Drawable icon, String text) {
+        SpannableString ss = new SpannableString("\u2002" + text);
+        if (icon != null) {
+            icon.setBounds(0, 0, icon.getIntrinsicWidth(), icon.getIntrinsicHeight());
+            ss.setSpan(new android.text.style.ImageSpan(icon, android.text.style.ImageSpan.ALIGN_BOTTOM),
+                    0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return ss;
+    }
+
+    /** 带图标的按钮文字更新（setText 会把图标冲掉，必须重建 Spannable） */
+    private void setBtnText(Button b, String text) {
+        Object tag = b.getTag();
+        b.setText(iconText(tag instanceof android.graphics.drawable.Drawable
+                ? (android.graphics.drawable.Drawable) tag : null, text));
+    }
+
     /** 带图标的按钮：图标用 Icons 现画，光标上来时和文字一起翻色 */
     private Button actionButton(String text, String iconKind, View.OnClickListener listener) {
         Button b = new Button(this);
-        b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         b.setTextColor(COLOR_TEXT);
         b.setBackground(Skin.button(th));
         b.setStateListAnimator(null);
         if (iconKind != null) {
-            b.setCompoundDrawablesRelativeWithIntrinsicBounds(
-                    Icons.drawable(this, iconKind, 18, COLOR_HINT), null, null, null);
-            b.setCompoundDrawablePadding(dp(7));
+            android.graphics.drawable.Drawable icon =
+                    Icons.drawable(this, iconKind, 17, COLOR_HINT);
+            b.setTag(icon);
+            b.setText(iconText(icon, text));
+        } else {
+            b.setText(text);
         }
         b.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
@@ -1212,9 +1233,10 @@ public class MainActivity extends Activity {
 
     /** 图标跟着文字一起翻色（焦点块是亮色，图标还留着灰的就糊了） */
     private void tintIcons(Button b, int color) {
-        android.graphics.drawable.Drawable[] ds = b.getCompoundDrawablesRelative();
-        for (android.graphics.drawable.Drawable d : ds) {
-            if (d != null) d.setTint(color);
+        Object tag = b.getTag();
+        if (tag instanceof android.graphics.drawable.Drawable) {
+            ((android.graphics.drawable.Drawable) tag).setTint(color);
+            b.invalidate();
         }
     }
 
