@@ -1200,22 +1200,6 @@ public class MainActivity extends Activity {
         styleTitle(title, "Cloudflare 优选", "从官方网段采样 → 延迟测试 → 下载测速，挑出最快的几个 IP");
         title.setPadding(0, 0, 0, dp(2));
 
-        btnCfStart = actionButton("开始优选", Icons.PLAY, new View.OnClickListener() {
-            @Override public void onClick(View v) { startCfOptimize(); }
-        });
-        stylePrimary(btnCfStart);
-
-        // 标题和主按钮并排：省下一整行给结果列表（540dp 高的盒子上这行很值钱）
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.BOTTOM);
-        head.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        LinearLayout.LayoutParams lpStart = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(52));
-        lpStart.setMargins(dp(16), 0, 0, dp(6));
-        head.addView(btnCfStart, lpStart);
-
         // 进度卡：阶段名 + 百分比 + 进度条 + 细节。原来只有一行 "延迟 12/320"，
         // 3 米外根本判断不出"还要等多久"，进度条是电视上最省认知的一眼信息。
         LinearLayout progCard = new LinearLayout(this);
@@ -1259,7 +1243,7 @@ public class MainActivity extends Activity {
         tvCfProgress = new TextView(this);
         styleText(tvCfProgress, COLOR_HINT, 12);
         tvCfProgress.setLineSpacing(dp(3), 1f);
-        tvCfProgress.setText("点右上「开始优选」开始。完成后在下方结果里选一条按 OK，即可写进指定域名的 hosts。");
+        tvCfProgress.setText("点下方「开始优选」开始。完成后在结果里选一条按 OK，即可写进指定域名的 hosts。");
         LinearLayout.LayoutParams lpDet = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lpDet.topMargin = dp(8);
@@ -1271,9 +1255,20 @@ public class MainActivity extends Activity {
         lp.topMargin = dp(12);
         cfList.setLayoutParams(lp);
 
-        root.addView(head);
+        // 主 CTA 放底部按钮行（与 Hosts 页「添加条目」同构）：
+        // 之前挤在标题行右侧，标题比按钮矮，按钮上沿被父容器裁掉——层级和高度都不可控
+        btnCfStart = actionButton("开始优选", Icons.PLAY, new View.OnClickListener() {
+            @Override public void onClick(View v) { startCfOptimize(); }
+        });
+        stylePrimary(btnCfStart);
+        LinearLayout buttons = new LinearLayout(this);
+        addButtons(buttons, new Button[]{btnCfStart});
+        wireButtonRow(new Button[]{btnCfStart}, navCfBtn);
+
+        root.addView(title);
         root.addView(progCard);
         root.addView(cfList);
+        root.addView(buttons);
         return root;
     }
 
