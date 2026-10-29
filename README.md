@@ -30,10 +30,11 @@
 
 ```bash
 adb connect <盒子IP>:5555
-adb install TVHostBox-v1.0.0.apk
+adb install TVHostBox-<版本号>.apk
 ```
 
 > 需要 root。首次写入 hosts 时 su 会弹授权（如有），允许即可。
+> 从 v1.0.0（临时签名版）升级需先 `adb uninstall tv.hostbox.app`；v1.0.1 起签名固定，之后可正常覆盖升级。
 
 ## 使用
 
