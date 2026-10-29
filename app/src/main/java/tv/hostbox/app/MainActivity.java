@@ -977,29 +977,31 @@ public class MainActivity extends Activity {
         head.addView(tvServerStatus, lpStatus);
 
         imgQr = new ImageView(this);
-        // 尺寸跟着"内容区实际可用高度"走：540dp 高的盒子上，卡片里还要放网址，不能再撑到 280dp
-        int qrSide = (int) Math.min(dp(160),
-                getResources().getDisplayMetrics().widthPixels * 0.21f);
+        // 网址已挪出卡片（做成整行地址栏），卡片里只有二维码，可以放大一档
+        int qrSide = (int) Math.min(dp(210),
+                getResources().getDisplayMetrics().widthPixels * 0.26f);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         imgQr.setLayoutParams(lp);
         imgQr.setBackground(Skin.qrFrame(th));
         imgQr.setPadding(dp(9), dp(9), dp(9), dp(9));
 
+        // 地址栏：整行等宽字展示，绝不随卡片宽度裁字
         tvQrUrl = new TextView(this);
-        styleText(tvQrUrl, COLOR_ACCENT, 15);
-        tvQrUrl.setGravity(Gravity.CENTER_HORIZONTAL);
+        styleText(tvQrUrl, COLOR_ACCENT, 16);
+        tvQrUrl.setGravity(Gravity.CENTER);
         tvQrUrl.setTypeface(android.graphics.Typeface.MONOSPACE);
-        tvQrUrl.setPadding(0, dp(8), 0, 0);
+        tvQrUrl.setMaxLines(1);
+        tvQrUrl.setBackground(Skin.card(th));
+        tvQrUrl.setPadding(dp(14), dp(10), dp(14), dp(10));
 
         // 左：二维码卡（竖排居中）；右：三步说明 —— 16:9 上左右分栏比一根竖条更平衡
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER);
         card.setBackground(Skin.card(th));
-        card.setPadding(dp(16), dp(12), dp(16), dp(12));
+        card.setPadding(dp(18), dp(14), dp(18), dp(14));
         card.addView(imgQr);
-        card.addView(tvQrUrl);
 
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.HORIZONTAL);
@@ -1038,6 +1040,11 @@ public class MainActivity extends Activity {
 
         body.addView(tips);
 
+        LinearLayout.LayoutParams lpUrl = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpUrl.topMargin = dp(12);
+        tvQrUrl.setLayoutParams(lpUrl);
+
         LinearLayout buttons = new LinearLayout(this);
         buttons.setGravity(Gravity.CENTER_HORIZONTAL);
         LinearLayout.LayoutParams lpBtnRow = new LinearLayout.LayoutParams(
@@ -1064,6 +1071,7 @@ public class MainActivity extends Activity {
 
         root.addView(head);
         root.addView(body);
+        root.addView(tvQrUrl);
         root.addView(buttons);
         return root;
     }
