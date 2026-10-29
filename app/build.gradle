@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'tv.hostbox.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'tv.hostbox.app'
+        minSdk 21
+        // 故意保持 28：目标设备为 Android 9 电视盒子，
+        // 低 targetSdk 可避免 cleartext / scoped storage 等限制
+        targetSdk 28
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            // CI 中先由 keytool 生成 keystore 再设置环境变量；
+            // 本地未配置时自动回退到 debug 签名，保证 assembleRelease 不报错
+            def ksFile = System.getenv('HOSTBOX_KEYSTORE')
+            if (ksFile != null && file(ksFile).exists()) {
+                storeFile file(ksFile)
+                storePassword System.getenv('HOSTBOX_STORE_PASS') ?: 'hostbox123'
+                keyAlias System.getenv('HOSTBOX_KEY_ALIAS') ?: 'hostbox'
+                keyPassword System.getenv('HOSTBOX_KEY_PASS') ?: 'hostbox123'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            def ksFile = System.getenv('HOSTBOX_KEYSTORE')
+            signingConfig = (ksFile != null && file(ksFile).exists()) ?
+                    signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // 零第三方依赖，不需要 androidX
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*']
+        }
+    }
+}
+
+dependencies {
+    // 刻意保持零依赖：
+    //  - root 执行自封装（RootShell）
+    //  - QR 码生成内置 Nayuki MIT 版（io.nayuki.qrcodegen）
+    //  - HTTP 配置服务用 ServerSocket 手写（ConfigServer）
+}

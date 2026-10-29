@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- 顶部导航 -->
+    <LinearLayout
+        android:id="@+id/nav_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:background="#0A0F1A"
+        android:padding="8dp">
+
+        <Button
+            android:id="@+id/nav_hosts"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_margin="6dp"
+            android:text="Hosts 管理"
+            android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/nav_qr"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_margin="6dp"
+            android:text="扫码配置"
+            android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/nav_cf"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_margin="6dp"
+            android:text="CF 优选"
+            android:textSize="20sp" />
+    </LinearLayout>
+
+    <!-- 内容区：由代码动态填充 -->
+    <FrameLayout
+        android:id="@+id/content"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</LinearLayout>
