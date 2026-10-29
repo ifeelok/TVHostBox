@@ -41,11 +41,20 @@ jobs:
           printf '%s' "$RAW_B64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/hostbox.keystore"
           md5sum "$RUNNER_TEMP/hostbox.keystore"
 
+      - name: Extract version from git tag
+        run: |
+          # tag v1.0.4 → 版本名 1.0.4；非 tag 构建（push/PR）用短 SHA 兜底标记
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "APP_VERSION=0.0.0-dev.${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
       - name: Build release APK
         env:
           HOSTBOX_KEYSTORE: ${{ runner.temp }}/hostbox.keystore
           HOSTBOX_KEY_ALIAS: hostbox
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease --no-daemon -PappVersionName="$APP_VERSION"
 
       - name: Rename APK (version from git tag)
         run: |

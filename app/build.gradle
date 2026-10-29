@@ -12,8 +12,14 @@ android {
         // 故意保持 28：目标设备为 Android 9 电视盒子，
         // 低 targetSdk 可避免 cleartext / scoped storage 等限制
         targetSdk 28
-        versionCode 3
-        versionName '1.2.0'
+        // 版本号统一由 git tag 驱动：CI 打 tag 时通过 -PappVersionName 注入（如 1.0.4），
+        // versionCode 由 versionName 自动推导（major*10000+minor*100+patch），
+        // 本地直接构建时使用下面的默认值兜底
+        def vName = (project.findProperty('appVersionName') ?: '1.0.4').toString()
+        versionCode = vName.tokenize('.').withIndex().sum { seg, i ->
+            (seg.isNumber() ? seg.toInteger() : 0) * (10000.intdiv(100 ** i))
+        }
+        versionName = vName
     }
 
     signingConfigs {
