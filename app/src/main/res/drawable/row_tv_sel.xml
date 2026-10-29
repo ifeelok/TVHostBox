@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 列表选中行（ListView 的行不会真正获得 focus，只能由 adapter 主动套这个背景） -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#1B3E5C" />
+    <stroke android:width="2dp" android:color="#4FC3F7" />
+    <corners android:radius="8dp" />
+</shape>

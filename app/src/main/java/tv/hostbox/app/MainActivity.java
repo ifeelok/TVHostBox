@@ -9,6 +9,7 @@ import android.graphics.Color;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
@@ -44,6 +45,7 @@ public class MainActivity extends Activity {
     private Button navHostsBtn, navQrBtn, navCfBtn;
     private LinearLayout panelHosts, panelQr, panelCf;
     private Button btnQrRefresh;
+    private Button btnHostsRefresh;
 
     // Hosts 面板
     private TextView tvRootStatus;
@@ -108,6 +110,11 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { showTab(2); }
         });
 
+        // 方向键显式绑定，不依赖 FocusFinder 猜测（否则在页签上按左右可能没反应）
+        wireNavKeys(navHostsBtn, 0, R.id.nav_qr);
+        wireNavKeys(navQrBtn, R.id.nav_hosts, R.id.nav_cf);
+        wireNavKeys(navCfBtn, R.id.nav_qr, 0);
+
         showTab(0);
 
         ConfigServer.setStatusListener(new ConfigServer.StatusListener() {
@@ -158,13 +165,43 @@ public class MainActivity extends Activity {
         styleNav(navCfBtn, index == 2);
         if (index == 1) refreshQr();
         // 焦点自动落位，避免遥控器"盲按"
+        focusContent(index);
+    }
+
+    /** 把焦点落到当前页签的内容区（空列表时退回到该页的可聚焦按钮） */
+    private boolean focusContent(int index) {
+        View target;
         if (index == 0) {
-            listHosts.requestFocus();
+            target = (entries.isEmpty() && btnHostsRefresh != null) ? btnHostsRefresh : listHosts;
         } else if (index == 1) {
-            btnQrRefresh.requestFocus();
-        } else if (index == 2) {
-            listCf.requestFocus();
+            target = btnQrRefresh;
+        } else {
+            target = (cfResults.isEmpty() && btnCfStart != null) ? btnCfStart : listCf;
         }
+        if (target == null || target.getVisibility() != View.VISIBLE) return false;
+        return target.requestFocus();
+    }
+
+    /**
+     * 页签按钮的方向键行为：左右在页签之间切换焦点，向下进入内容区。
+     * 显式处理可避免某些盒子上 FocusFinder 找不到邻居、按键"没反应"的问题。
+     */
+    private void wireNavKeys(Button b, final int leftId, final int rightId) {
+        b.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    return focusContent(currentTab);
+                }
+                int targetId = keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? leftId
+                        : keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ? rightId : 0;
+                if (targetId == 0) return false;
+                View t = findViewById(targetId);
+                if (t == null || !t.isFocusable()) return false;
+                t.requestFocus();
+                return true;
+            }
+        });
     }
 
     private void styleNav(View v, boolean active) {
@@ -206,6 +243,12 @@ public class MainActivity extends Activity {
                 confirmDelete(entries.get(position));
             }
         });
+        listHosts.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                hostsAdapter.setSelected(position);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
 
         // 空状态提示（ListView 自动切换可见性）
         TextView tvEmptyHosts = new TextView(this);
@@ -223,9 +266,10 @@ public class MainActivity extends Activity {
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.addView(actionButton("刷新", new View.OnClickListener() {
+        btnHostsRefresh = actionButton("刷新", new View.OnClickListener() {
             @Override public void onClick(View v) { loadHostsAsync(); }
-        }));
+        });
+        buttons.addView(btnHostsRefresh);
         buttons.addView(actionButton("添加条目", new View.OnClickListener() {
             @Override public void onClick(View v) { showAddDialog(); }
         }));
@@ -611,6 +655,12 @@ public class MainActivity extends Activity {
                 showApplyDialog(cfResults.get(position));
             }
         });
+        listCf.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                cfAdapter.setSelected(position);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
 
         // 空状态提示
         TextView tvEmptyCf = new TextView(this);
@@ -835,6 +885,16 @@ public class MainActivity extends Activity {
     // ==================== Adapter ====================
 
     private class HostsAdapter extends BaseAdapter {
+        /** 当前选中行：ListView 的行拿不到 focus，只能自己记位置并主动高亮 */
+        int selPos = 0;
+
+        void setSelected(int p) {
+            if (p != selPos && p >= 0) {
+                selPos = p;
+                notifyDataSetChanged();
+            }
+        }
+
         @Override public int getCount() { return entries.size(); }
         @Override public Object getItem(int position) { return entries.get(position); }
         @Override public long getItemId(int position) { return position; }
@@ -847,7 +907,6 @@ public class MainActivity extends Activity {
                 row.setOrientation(LinearLayout.VERTICAL);
                 int pad = dp(12);
                 row.setPadding(pad, pad, pad, pad);
-                row.setBackgroundResource(R.drawable.row_tv);
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 18);
                 tvSub = new TextView(MainActivity.this);
@@ -861,6 +920,11 @@ public class MainActivity extends Activity {
                 tvMain = tags[0];
                 tvSub = tags[1];
             }
+            boolean sel = position == selPos;
+            row.setBackgroundResource(sel ? R.drawable.row_tv_sel : R.drawable.row_tv);
+            tvMain.setTextColor(sel ? COLOR_ACCENT : COLOR_TEXT);
+            tvSub.setTextColor(sel ? 0xFFB3E5FC : COLOR_HINT);
+
             HostsManager.Entry e = entries.get(position);
             tvMain.setText(e.host + "  →  " + e.ip);
             tvSub.setText("行 " + (e.lineIndex + 1) + (e.comment != null ? " · 注释: " + e.comment : ""));
@@ -869,6 +933,16 @@ public class MainActivity extends Activity {
     }
 
     private class CfAdapter extends BaseAdapter {
+        /** 当前选中行：见 HostsAdapter 说明 */
+        int selPos = 0;
+
+        void setSelected(int p) {
+            if (p != selPos && p >= 0) {
+                selPos = p;
+                notifyDataSetChanged();
+            }
+        }
+
         @Override public int getCount() { return cfResults.size(); }
         @Override public Object getItem(int position) { return cfResults.get(position); }
         @Override public long getItemId(int position) { return position; }
@@ -881,11 +955,10 @@ public class MainActivity extends Activity {
                 row.setOrientation(LinearLayout.VERTICAL);
                 int pad = dp(12);
                 row.setPadding(pad, pad, pad, pad);
-                row.setBackgroundResource(R.drawable.row_tv);
                 tvMain = new TextView(MainActivity.this);
-                styleText(tvMain, COLOR_TEXT, 18);
+                styleText(tvMain, COLOR_TEXT, 20);
                 tvSub = new TextView(MainActivity.this);
-                styleText(tvSub, COLOR_HINT, 14);
+                styleText(tvSub, COLOR_HINT, 15);
                 row.addView(tvMain);
                 row.addView(tvSub);
                 row.setTag(new TextView[]{tvMain, tvSub});
@@ -895,6 +968,11 @@ public class MainActivity extends Activity {
                 tvMain = tags[0];
                 tvSub = tags[1];
             }
+            boolean sel = position == selPos;
+            row.setBackgroundResource(sel ? R.drawable.row_tv_sel : R.drawable.row_tv);
+            tvMain.setTextColor(sel ? COLOR_ACCENT : COLOR_TEXT);
+            tvSub.setTextColor(sel ? 0xFFB3E5FC : COLOR_HINT);
+
             CfOptimizer.Candidate c = cfResults.get(position);
             tvMain.setText((position + 1) + ". " + c.ip);
             tvSub.setText("延迟 " + c.rttMs + "ms · "

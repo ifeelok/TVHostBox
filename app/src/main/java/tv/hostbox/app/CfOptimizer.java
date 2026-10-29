@@ -1,20 +1,17 @@
 package tv.hostbox.app;
 
 import java.io.InputStream;
-import java.net.HttpURLConnection;
+import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.URL;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -22,8 +19,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.net.ssl.HostnameVerifier;
-import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
@@ -45,6 +45,9 @@ public final class CfOptimizer {
             "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
             "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"
     };
+
+    /** 测速用的目标域名（SNI + Host 头都必须是它） */
+    private static final String SPEED_HOST = "speed.cloudflare.com";
 
     public static class Candidate {
         public final String ip;
@@ -150,6 +153,13 @@ public final class CfOptimizer {
             Thread.sleep(100);
         }
 
+        // 测速结果统计：全失败时给出明确提示，便于排查网络是否屏蔽了该域名
+        int speedOk = 0;
+        for (Candidate c : speedPool) if (c.mbps > 0) speedOk++;
+        progress.onProgress("speed", speedPool.size(), speedPool.size(),
+                speedOk > 0 ? ("测速成功 " + speedOk + "/" + speedPool.size())
+                        : "测速全部失败（网络可能无法访问 " + SPEED_HOST + "）");
+
         // ---------- 4. 排序取前 N ----------
         List<Candidate> result = new ArrayList<Candidate>();
         // 速度有效的排前面，按速度降序；速度同分按延迟升序
@@ -239,29 +249,66 @@ public final class CfOptimizer {
 
     /**
      * 通过 IP 直连 HTTPS 下载测速。
-     * Host 头指向 speed.cloudflare.com；信任所有证书（只用于测速）。
+     *
+     * 注意：这里**不能**用 HttpURLConnection —— Android 的实现会忽略手动设置的
+     * Host 请求头（属于受限头），请求会落到 https://&lt;IP&gt;/，Cloudflare 无法按域名路由，
+     * 结果必然失败（表现为全部"未测速"）。因此改用裸 SSLSocket：
+     *   - SNI 设为 speed.cloudflare.com（CF 靠 SNI 决定路由）
+     *   - 手工拼 HTTP 请求，Host 头由我们自己写
+     *   - 只统计响应体读取阶段的时间，排除 TLS 握手开销
      */
     static double downloadSpeed(String ip, int bytes, int timeoutMs) {
-        HttpURLConnection conn = null;
+        javax.net.ssl.SSLSocket sock = null;
         try {
-            URL url = new URL("https://" + ip + "/__down?bytes=" + bytes);
-            conn = (HttpURLConnection) url.openConnection();
-            if (conn instanceof HttpsURLConnection) {
-                HttpsURLConnection h = (HttpsURLConnection) conn;
-                h.setSSLSocketFactory(trustAllFactory());
-                h.setHostnameVerifier(trustAllVerifier());
-            }
-            conn.setRequestProperty("Host", "speed.cloudflare.com");
-            conn.setRequestProperty("User-Agent", "HostBox/1.0");
-            conn.setConnectTimeout(timeoutMs);
-            conn.setReadTimeout(timeoutMs);
+            SSLSocketFactory f = trustAllFactory();
+            sock = (javax.net.ssl.SSLSocket) f.createSocket();
+            sock.connect(new InetSocketAddress(InetAddress.getByName(ip), 443), timeoutMs);
+            sock.setSoTimeout(timeoutMs);
 
+            // SNI：Cloudflare 依据 SNI 选择站点，必须是目标域名而不是 IP
+            try {
+                javax.net.ssl.SSLParameters params = sock.getSSLParameters();
+                java.util.List<javax.net.ssl.SNIServerName> names = new ArrayList<javax.net.ssl.SNIServerName>();
+                names.add(new javax.net.ssl.SNIHostName(SPEED_HOST));
+                params.setServerNames(names);
+                sock.setSSLParameters(params);
+            } catch (Throwable ignored) { }
+
+            sock.startHandshake();
+
+            java.io.OutputStream os = sock.getOutputStream();
+            String req = "GET /__down?bytes=" + bytes + " HTTP/1.1\r\n"
+                    + "Host: " + SPEED_HOST + "\r\n"
+                    + "User-Agent: TVHostBox/1.0\r\n"
+                    + "Accept: */*\r\n"
+                    + "Connection: close\r\n\r\n";
+            os.write(req.getBytes("UTF-8"));
+            os.flush();
+
+            InputStream is = sock.getInputStream();
+
+            // 读取响应头，直到 \r\n\r\n（上限 8KB）
+            byte[] hdr = new byte[8192];
+            int hn = 0;
+            while (hn < hdr.length) {
+                int b = is.read();
+                if (b < 0) break;
+                hdr[hn++] = (byte) b;
+                if (hn >= 4 && hdr[hn - 4] == '\r' && hdr[hn - 3] == '\n'
+                        && hdr[hn - 2] == '\r' && hdr[hn - 1] == '\n') break;
+            }
+            String head = new String(hdr, 0, hn, "ISO-8859-1");
+            if (!head.startsWith("HTTP/1.")) return -1;
+            int sp = head.indexOf(' ');
+            if (sp < 0 || sp + 4 > head.length()) return -1;
+            if (!"200".equals(head.substring(sp + 1, sp + 4))) return -1;
+
+            // 只计时响应体
             long t0 = System.nanoTime();
-            InputStream is = conn.getInputStream();
             byte[] buf = new byte[16384];
             long total = 0;
             int n;
-            long deadline = System.nanoTime() + (long) timeoutMs * 1000000L * 2;
+            long deadline = t0 + (long) timeoutMs * 1000000L * 3;
             while (total < bytes && (n = is.read(buf)) > 0) {
                 total += n;
                 if (System.nanoTime() > deadline) break;
@@ -273,7 +320,7 @@ public final class CfOptimizer {
         } catch (Exception e) {
             return -1;
         } finally {
-            if (conn != null) try { conn.disconnect(); } catch (Exception ignored) {}
+            if (sock != null) try { sock.close(); } catch (Exception ignored) {}
         }
     }
 

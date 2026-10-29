@@ -1,5 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="#4FC3F7" />
-    <corners android:radius="6dp" />
-</shape>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 当前激活页签：青底深字；获得焦点时再加白色描边环，与"仅仅是激活"区分开 -->
+    <item android:state_focused="true">
+        <shape>
+            <solid android:color="#4FC3F7" />
+            <stroke android:width="3dp" android:color="#FFFFFF" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape>
+            <solid android:color="#4FC3F7" />
+            <stroke android:width="3dp" android:color="#FFFFFF" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape>
+            <solid android:color="#4FC3F7" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>
