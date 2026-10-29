@@ -50,24 +50,11 @@
 
 ## 界面
 
-> 下图为 1920×1080 界面预览（按实机 1dp=2px 还原的设计稿；实机截图待电视开机后补拍）。
+> 下图为 1920×1080 真机截图（移动魔百盒 CM311-1sa，Android 9）。
 
 | Hosts 管理 | 扫码配置 | CF 优选 |
 |---|---|---|
 | ![Hosts 管理](docs/screenshots/ui-hosts.png) | ![扫码配置](docs/screenshots/ui-qr.png) | ![CF 优选](docs/screenshots/ui-cf.png) |
-
-<details>
-<summary>v1.1.x 实机截图（旧版界面）</summary>
-
-| Hosts 管理 · 列表框态 | Hosts 管理 · 焦点直达按钮行 |
-|---|---|
-| ![Hosts 管理列表](docs/screenshots/hosts-focus-box.png) | ![焦点直达按钮](docs/screenshots/hosts-direct-jump.png) |
-
-| 松林绿主题 | 日间浅色主题 |
-|---|---|
-| ![松林绿](docs/screenshots/theme-pine-green.png) | ![日间浅色](docs/screenshots/theme-light.png) |
-
-</details>
 
 三个页签，遥控器左右切换、上下移动、OK 确认，全程不需要鼠标：
 
