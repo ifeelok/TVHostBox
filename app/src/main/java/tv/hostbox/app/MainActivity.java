@@ -47,6 +47,10 @@ public class MainActivity extends Activity {
     private Button btnQrRefresh;
     private Button btnQrService;
     private Button btnHostsRefresh;
+    private Button btnHostsAdd;
+
+    /** 首次拿到窗口焦点时把焦点放到页签上，只做一次 */
+    private boolean initialFocusDone = false;
 
     // Hosts 面板
     private TextView tvRootStatus;
@@ -118,7 +122,8 @@ public class MainActivity extends Activity {
         wireNavKeys(navQrBtn, R.id.nav_hosts, R.id.nav_cf, 0, 2);
         wireNavKeys(navCfBtn, R.id.nav_qr, 0, 1, -1);
 
-        showTab(0);
+        // 首次进入不抢内容区焦点：焦点默认停在「Hosts 管理」页签上
+        showTab(0, false);
 
         ConfigServer.setStatusListener(new ConfigServer.StatusListener() {
             @Override public void onStatus(String msg) {
@@ -156,6 +161,22 @@ public class MainActivity extends Activity {
         if (currentTab == 1) refreshQr();
     }
 
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // onCreate 里视图还没完成布局，requestFocus 不一定生效；
+        // 等第一次真正拿到窗口焦点时再把光标放到页签，避免启动后落到底部「刷新」按钮。
+        if (hasFocus && !initialFocusDone) {
+            initialFocusDone = true;
+            if (navHostsBtn != null) {
+                // 再 post 一次，确保布局完成后再抢焦点（低端盒子上 onWindowFocusChanged 可能早于首帧）
+                navHostsBtn.post(new Runnable() {
+                    @Override public void run() { navHostsBtn.requestFocus(); }
+                });
+            }
+        }
+    }
+
     // ==================== 页面切换 ====================
 
     private void showTab(int index) {
@@ -184,7 +205,11 @@ public class MainActivity extends Activity {
     private boolean focusContent(int index) {
         View target;
         if (index == 0) {
-            target = (entries.isEmpty() && btnHostsRefresh != null) ? btnHostsRefresh : listHosts;
+            // 列表为空时 ListView 会被 emptyView 顶掉（不可见），
+            // 所以退到「添加条目」而不是「刷新」——那才是这时最该做的事
+            target = entries.isEmpty()
+                    ? (btnHostsAdd != null ? btnHostsAdd : btnHostsRefresh)
+                    : listHosts;
         } else if (index == 1) {
             target = btnQrRefresh;
         } else {
@@ -338,6 +363,7 @@ public class MainActivity extends Activity {
         Button btnAdd = actionButton("添加条目", new View.OnClickListener() {
             @Override public void onClick(View v) { showAddDialog(); }
         });
+        btnHostsAdd = btnAdd;
         Button btnBackup = actionButton("备份", new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
         });
