@@ -111,9 +111,10 @@ public class MainActivity extends Activity {
         });
 
         // 方向键显式绑定，不依赖 FocusFinder 猜测（否则在页签上按左右可能没反应）
-        wireNavKeys(navHostsBtn, 0, R.id.nav_qr);
-        wireNavKeys(navQrBtn, R.id.nav_hosts, R.id.nav_cf);
-        wireNavKeys(navCfBtn, R.id.nav_qr, 0);
+        // 左右移动焦点时直接切到该页签内容，无需再按 OK
+        wireNavKeys(navHostsBtn, 0, R.id.nav_qr, -1, 1);
+        wireNavKeys(navQrBtn, R.id.nav_hosts, R.id.nav_cf, 0, 2);
+        wireNavKeys(navCfBtn, R.id.nav_qr, 0, 1, -1);
 
         showTab(0);
 
@@ -156,6 +157,15 @@ public class MainActivity extends Activity {
     // ==================== 页面切换 ====================
 
     private void showTab(int index) {
+        showTab(index, true);
+    }
+
+    /**
+     * 切换页签。
+     * @param moveFocusIntoContent true = 焦点自动落到该页内容区（点 OK 切页签时）；
+     *                             false = 保持焦点不动（左右方向键扫过页签时，焦点留在页签上）
+     */
+    private void showTab(int index, boolean moveFocusIntoContent) {
         currentTab = index;
         panelHosts.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         panelQr.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
@@ -165,7 +175,7 @@ public class MainActivity extends Activity {
         styleNav(navCfBtn, index == 2);
         if (index == 1) refreshQr();
         // 焦点自动落位，避免遥控器"盲按"
-        focusContent(index);
+        if (moveFocusIntoContent) focusContent(index);
     }
 
     /** 把焦点落到当前页签的内容区（空列表时退回到该页的可聚焦按钮） */
@@ -183,21 +193,30 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 页签按钮的方向键行为：左右在页签之间切换焦点，向下进入内容区。
+     * 页签按钮的方向键行为：
+     *  - 左右：焦点移到相邻页签，并**立即切换到该页签的内容**（不用再按 OK）；
+     *  - 向下：焦点进入当前页签的内容区。
      * 显式处理可避免某些盒子上 FocusFinder 找不到邻居、按键"没反应"的问题。
      */
-    private void wireNavKeys(Button b, final int leftId, final int rightId) {
+    private void wireNavKeys(Button b, final int leftId, final int rightId,
+                             final int leftTab, final int rightTab) {
         b.setOnKeyListener(new View.OnKeyListener() {
             @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                     return focusContent(currentTab);
                 }
-                int targetId = keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? leftId
-                        : keyCode == KeyEvent.KEYCODE_DPAD_RIGHT ? rightId : 0;
+                if (keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    return false;
+                }
+                boolean left = keyCode == KeyEvent.KEYCODE_DPAD_LEFT;
+                int targetId = left ? leftId : rightId;
+                int targetTab = left ? leftTab : rightTab;
                 if (targetId == 0) return false;
                 View t = findViewById(targetId);
                 if (t == null || !t.isFocusable()) return false;
+                // 先切内容（不移动焦点），再让焦点留在目标页签上
+                if (targetTab >= 0) showTab(targetTab, false);
                 t.requestFocus();
                 return true;
             }
