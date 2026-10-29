@@ -90,6 +90,9 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("hostbox", Context.MODE_PRIVATE);
 
         th = Theme.get(prefs.getInt(PREF_THEME, 0));
+        // 调试/截图用：am start ... --ei previewTheme N 可临时预览某套主题（不写入设置）
+        int previewTheme = getIntent().getIntExtra("previewTheme", -1);
+        if (previewTheme >= 0 && previewTheme < Theme.ALL.length) th = Theme.get(previewTheme);
         COLOR_BG = th.bg;
         COLOR_TEXT = th.text;
         COLOR_HINT = th.hint;
