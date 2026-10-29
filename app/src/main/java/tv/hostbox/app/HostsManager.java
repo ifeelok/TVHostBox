@@ -1,5 +1,6 @@
 package tv.hostbox.app;
 
+import android.content.Context;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -24,6 +25,9 @@ public final class HostsManager {
     public static final String HOSTS_PATH = "/system/etc/hosts";
     private static final String TMP_NAME = "hosts_new";
     private static final String BACKUP_DIR = "/sdcard/hostbox";
+    /** 备份保留数量的 SharedPreferences key；0 = 不限制 */
+    public static final String PREF_MAX_BACKUPS = "maxBackups";
+    public static final int DEFAULT_MAX_BACKUPS = 20;
 
     public static class Entry {
         public String ip;
@@ -143,6 +147,8 @@ public final class HostsManager {
                 "echo WRITE_RC=$rc\n";
             RootShell.Result r = RootShell.run(script);
             if (r.output.contains("WRITE_RC=0")) {
+                // 按用户设置的保留数量清理旧备份（不阻塞主流程）
+                cleanupBackups();
                 // 回读校验
                 try {
                     String back = readRaw();
@@ -231,16 +237,42 @@ public final class HostsManager {
         return out;
     }
 
-    /** 恢复指定备份文件 */
+    /**
+     * 按用户设置（PREF_MAX_BACKUPS，0=不限制）清理多余备份，保留最新的 N 份。
+     * 内部方法，writeRaw 成功后调用；失败静默（不影响写入结果）。
+     */
+    private static void cleanupBackups() {
+        try {
+            int keep = AppContextHolder.get()
+                    .getSharedPreferences("hostbox", Context.MODE_PRIVATE)
+                    .getInt(PREF_MAX_BACKUPS, DEFAULT_MAX_BACKUPS);
+            if (keep <= 0) return; // 不限制
+            // ls -t 按修改时间新→旧排列，跳过前 keep 个，其余删除
+            String script =
+                "cd " + BACKUP_DIR + " 2>/dev/null\n" +
+                "ls -t | grep '^hosts\\.bak\\.' | tail -n +" + (keep + 1) +
+                " | while read f; do rm -f \"$f\"; done\n" +
+                "echo CLEAN_RC=$?\n";
+            RootShell.run(script);
+        } catch (Exception ignored) {}
+    }
+
+    /** 恢复指定备份文件（恢复前先把当前 hosts 也备份一份，防误恢复无法回退） */
     public static String restoreBackup(String name) {
         String script =
+            "mkdir -p " + BACKUP_DIR + "\n" +
+            "cp -f " + HOSTS_PATH + " " + BACKUP_DIR + "/hosts.bak.$(date +%Y%m%d_%H%M%S)_before_restore\n" +
             "mount -o rw,remount /system 2>/dev/null\n" +
             "mount -o rw,remount / 2>/dev/null\n" +
             "cp -f " + BACKUP_DIR + "/" + name + " " + HOSTS_PATH + "\n" +
             "chmod 644 " + HOSTS_PATH + "\n" +
             "echo RC=$?\n";
         RootShell.Result r = RootShell.run(script);
-        return r.output.contains("RC=0") ? null : "恢复失败：" + r.output;
+        if (r.output.contains("RC=0")) {
+            cleanupBackups();
+            return null;
+        }
+        return "恢复失败：" + r.output;
     }
 
     public static String now() {

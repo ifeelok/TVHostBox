@@ -61,6 +61,15 @@ public final class CfOptimizer {
         void onProgress(String phase, int done, int total, String detail);
     }
 
+    private volatile boolean cancelled = false;
+
+    /** 请求取消优选，optimize 会尽快以 InterruptedException 结束 */
+    public void cancel() { cancelled = true; }
+
+    private void checkCancelled() throws InterruptedException {
+        if (cancelled) throw new InterruptedException("已取消");
+    }
+
     public final int sampleCount;   // 采样数
     public final int latencyTop;    // 进入测速的个数
     public final int topN;          // 最终保留个数
@@ -107,6 +116,8 @@ public final class CfOptimizer {
         }
         pool.shutdown();
         while (!pool.isTerminated()) {
+            checkCancelled();
+            if (cancelled) pool.shutdownNow();
             Thread.sleep(100);
         }
         progress.onProgress("latency", ips.size(), ips.size(), "存活 " + latencyOk.size() + " 个");
@@ -125,6 +136,7 @@ public final class CfOptimizer {
         for (final Candidate c : new ArrayList<Candidate>(speedPool)) {
             pool2.execute(new Runnable() {
                 @Override public void run() {
+                    if (cancelled) return;
                     c.mbps = downloadSpeed(c.ip, downloadBytes, 8000);
                     progress.onProgress("speed", done2.incrementAndGet(), speedPool.size(),
                             c.ip + " → " + (c.mbps < 0 ? "失败" : String.format("%.1f Mbps", c.mbps)));
@@ -133,6 +145,8 @@ public final class CfOptimizer {
         }
         pool2.shutdown();
         while (!pool2.isTerminated()) {
+            checkCancelled();
+            if (cancelled) pool2.shutdownNow();
             Thread.sleep(100);
         }
 

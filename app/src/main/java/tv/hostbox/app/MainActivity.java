@@ -6,14 +6,9 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.WifiManager;
 import android.os.Bundle;
-import android.text.Editable;
-import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
-import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
@@ -36,7 +31,6 @@ import java.util.Enumeration;
 import java.util.List;
 
 import io.nayuki.qrcodegen.QrCode;
-import io.nayuki.qrcodegen.QrSegment;
 
 public class MainActivity extends Activity {
 
@@ -47,7 +41,7 @@ public class MainActivity extends Activity {
     private static final int COLOR_ACCENT = 0xFF4FC3F7;
     private static final int COLOR_DANGER = 0xFFEF5350;
 
-    private LinearLayout navHostsBtn, navQrBtn, navCfBtn;
+    private Button navHostsBtn, navQrBtn, navCfBtn;
     private LinearLayout panelHosts, panelQr, panelCf;
     private Button btnQrRefresh;
 
@@ -55,9 +49,9 @@ public class MainActivity extends Activity {
     private TextView tvRootStatus;
     private ListView listHosts;
     private TextView tvHostsSummary;
+    private TextView tvActionResult; // 持久显示写入/删除/恢复结果（Toast 太快会错过）
     private List<HostsManager.Entry> entries = new ArrayList<HostsManager.Entry>();
     private HostsAdapter hostsAdapter;
-    private String rawHosts = "";
 
     // 扫码面板
     private TextView tvQrUrl;
@@ -71,8 +65,15 @@ public class MainActivity extends Activity {
     private List<CfOptimizer.Candidate> cfResults = new ArrayList<CfOptimizer.Candidate>();
     private CfAdapter cfAdapter;
     private volatile boolean cfRunning = false;
+    private volatile CfOptimizer cfOpt = null; // 当前优选任务（用于取消）
+
+    // 设置项 key（CF 参数）
+    private static final String PREF_CF_TOPN = "cfTopN";        // 保留前几名，默认 8
+    private static final String PREF_CF_SAMPLE = "cfSample";    // 采样数量，默认 320
+    private static final String PREF_CF_DOWNLOAD_MB = "cfDownloadMB"; // 测速大小 MB，默认 6
 
     private SharedPreferences prefs;
+    private int currentTab = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -138,9 +139,17 @@ public class MainActivity extends Activity {
         ConfigServer.stop();
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 盒子 IP 可能在后台被 DHCP 改变，回到前台/回到本页时刷新二维码
+        if (currentTab == 1) refreshQr();
+    }
+
     // ==================== 页面切换 ====================
 
     private void showTab(int index) {
+        currentTab = index;
         panelHosts.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         panelQr.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         panelCf.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
@@ -198,6 +207,20 @@ public class MainActivity extends Activity {
             }
         });
 
+        // 空状态提示（ListView 自动切换可见性）
+        TextView tvEmptyHosts = new TextView(this);
+        styleText(tvEmptyHosts, COLOR_HINT, 16);
+        tvEmptyHosts.setGravity(Gravity.CENTER);
+        tvEmptyHosts.setText("暂无 hosts 条目\n\n按下方「添加条目」新增，\n或到「扫码配置」用手机添加");
+        LinearLayout.LayoutParams lpEmpty = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        tvEmptyHosts.setLayoutParams(lpEmpty);
+        listHosts.setEmptyView(tvEmptyHosts);
+
+        // 操作结果持久显示（Toast 在电视上太短暂）
+        tvActionResult = new TextView(this);
+        styleText(tvActionResult, COLOR_HINT, 14);
+
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.addView(actionButton("刷新", new View.OnClickListener() {
@@ -209,11 +232,16 @@ public class MainActivity extends Activity {
         buttons.addView(actionButton("备份列表", new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
         }));
+        buttons.addView(actionButton("设置", new View.OnClickListener() {
+            @Override public void onClick(View v) { showSettingsDialog(); }
+        }));
 
         root.addView(tvRootStatus);
         root.addView(title);
         root.addView(tvHostsSummary);
         root.addView(listHosts);
+        root.addView(tvEmptyHosts);
+        root.addView(tvActionResult);
         root.addView(buttons);
         return root;
     }
@@ -226,7 +254,6 @@ public class MainActivity extends Activity {
                     final List<HostsManager.Entry> parsed = HostsManager.parse(raw);
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
-                            rawHosts = raw;
                             entries = parsed;
                             hostsAdapter.notifyDataSetChanged();
                             tvHostsSummary.setText("共 " + entries.size() + " 条解析记录 · 文件 " + raw.length() + " 字节");
@@ -279,13 +306,22 @@ public class MainActivity extends Activity {
                 final String err = HostsManager.remove(domain);
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (err == null) toast("已删除 " + domain);
-                        else toast("删除失败：" + err);
+                        showActionResult(err == null,
+                                err == null ? "✔ 已删除 " + domain : "✘ 删除失败：" + err);
                         loadHostsAsync();
                     }
                 });
             }
         }, "remove-host").start();
+    }
+
+    /** 操作结果持久显示在列表下方（成功绿/失败红），同时配一个 Toast */
+    private void showActionResult(boolean ok, String msg) {
+        if (tvActionResult != null) {
+            tvActionResult.setText(msg);
+            tvActionResult.setTextColor(ok ? 0xFF66BB6A : COLOR_DANGER);
+        }
+        toast(msg);
     }
 
     private void showAddDialog() {
@@ -303,23 +339,24 @@ public class MainActivity extends Activity {
         box.addView(etDomain);
         box.addView(buildDomainPicker(etDomain));
 
-        new AlertDialog.Builder(this)
+        AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("添加 hosts 条目")
                 .setView(box)
-                .setPositiveButton("写入", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface d, int w) {
-                        String ip = etIp.getText().toString().trim();
-                        String domain = etDomain.getText().toString().trim();
-                        if (!HostsManager.isValidIp(ip) || domain.isEmpty()) {
-                            toast("IP 或域名无效");
-                            return;
-                        }
-                        prefs.edit().putString("lastDomain", domain).apply();
-                        doUpsertAsync(domain, ip);
-                    }
-                })
+                .setPositiveButton("写入", null) // 点击行为在 show() 后拦截，校验失败不关闭
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+        dlg.show();
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                String ip = etIp.getText().toString().trim();
+                String domain = etDomain.getText().toString().trim();
+                if (!HostsManager.isValidIp(ip)) { toast("IP 无效，请检查"); return; }
+                if (domain.isEmpty()) { toast("域名为空"); return; }
+                prefs.edit().putString("lastDomain", domain).apply();
+                dlg.dismiss();
+                doUpsertAsync(domain, ip);
+            }
+        });
     }
 
     private void doUpsertAsync(final String domain, final String ip) {
@@ -329,13 +366,74 @@ public class MainActivity extends Activity {
                 final String err = HostsManager.upsert(domain, ip);
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (err == null) toast("写入成功（原文件已备份到 /sdcard/hostbox）");
-                        else toast("写入失败：" + err);
+                        showActionResult(err == null,
+                                err == null ? "✔ 写入成功 " + domain + " → " + ip + "（原文件已备份）"
+                                        : "✘ 写入失败：" + err);
                         loadHostsAsync();
                     }
                 });
             }
         }, "upsert-host").start();
+    }
+
+    // ==================== 设置 ====================
+
+    /** 统一设置入口：备份上限 + CF 优选参数 */
+    private void showSettingsDialog() {
+        int keep = prefs.getInt(HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
+        int topN = prefs.getInt(PREF_CF_TOPN, 8);
+        int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
+        int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
+        final String[] items = {
+                "备份保留数量：" + (keep <= 0 ? "不限制" : keep + " 份"),
+                "CF 优选保留条数：" + topN,
+                "CF 采样数量：" + sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
+                "CF 单 IP 测速流量：" + mb + " MB",
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("设置")
+                .setItems(items, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        if (w == 0) pickFromOptions("备份保留数量（写入时自动清理）",
+                                new String[]{"保留最近 10 份", "保留最近 20 份", "保留最近 50 份", "不限制"},
+                                new int[]{10, 20, 50, 0},
+                                HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
+                        else if (w == 1) pickFromOptions("CF 优选结果保留前几名",
+                                new String[]{"前 5 名", "前 8 名", "前 10 名", "前 15 名"},
+                                new int[]{5, 8, 10, 15},
+                                PREF_CF_TOPN, 8);
+                        else if (w == 2) pickFromOptions("CF 网段采样数量（越多越准越慢）",
+                                new String[]{"160 个（快）", "320 个（标准）", "640 个（充分）"},
+                                new int[]{160, 320, 640},
+                                PREF_CF_SAMPLE, 320);
+                        else if (w == 3) pickFromOptions("每个候选 IP 的测速下载量",
+                                new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
+                                new int[]{2, 6, 12},
+                                PREF_CF_DOWNLOAD_MB, 6);
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void pickFromOptions(String title, final String[] labels, final int[] values,
+                                 final String key, int defValue) {
+        int current = prefs.getInt(key, defValue);
+        int checked = 0;
+        for (int i = 0; i < values.length; i++) {
+            if (values[i] == current) { checked = i; break; }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setSingleChoiceItems(labels, checked, new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        prefs.edit().putInt(key, values[w]).apply();
+                        d.dismiss();
+                        toast("已设置：" + labels[w]);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void showBackupList() {
@@ -348,11 +446,10 @@ public class MainActivity extends Activity {
                             toast("暂无备份（首次写入时会自动生成）");
                             return;
                         }
-                        Collections.reverse(backups);
+                        Collections.reverse(backups); // 新→旧
                         new AlertDialog.Builder(MainActivity.this)
-                                .setTitle("选择要恢复的备份（近 10 个）")
-                                .setItems(backups.subList(0, Math.min(10, backups.size()))
-                                        .toArray(new String[0]),
+                                .setTitle("选择要恢复的备份（共 " + backups.size() + " 个，新→旧）")
+                                .setItems(backups.toArray(new String[0]),
                                         new android.content.DialogInterface.OnClickListener() {
                                     @Override public void onClick(android.content.DialogInterface d, int w) {
                                         // w 是索引，取对应名字
@@ -362,7 +459,9 @@ public class MainActivity extends Activity {
                                                 final String err = HostsManager.restoreBackup(name);
                                                 runOnUiThread(new Runnable() {
                                                     @Override public void run() {
-                                                        toast(err == null ? "已恢复 " + name : "恢复失败：" + err);
+                                                        showActionResult(err == null,
+                                                                err == null ? "✔ 已恢复 " + name
+                                                                        : "✘ 恢复失败：" + err);
                                                         loadHostsAsync();
                                                     }
                                                 });
@@ -388,7 +487,10 @@ public class MainActivity extends Activity {
         tip.setText("用手机「相机 / 微信扫一扫」扫描二维码，在手机浏览器里编辑 hosts 并保存");
 
         imgQr = new ImageView(this);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(300), dp(300));
+        // 按屏幕宽度自适应，避免低分辨率/小屏盒子溢出（不超过屏宽 45%）
+        int qrSide = (int) Math.min(dp(300),
+                getResources().getDisplayMetrics().widthPixels * 0.45f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         lp.topMargin = dp(10);
         imgQr.setLayoutParams(lp);
@@ -492,7 +594,7 @@ public class MainActivity extends Activity {
 
         tvCfProgress = new TextView(this);
         styleText(tvCfProgress, COLOR_HINT, 15);
-        tvCfProgress.setText("对 Cloudflare 官方网段采样 → TCP 443 延迟测试 → 下载测速 → 取前 8 名。");
+        tvCfProgress.setText("对 Cloudflare 网段采样 → TCP 443 延迟测试 → 下载测速。\n完成后选中某条按 OK 应用到域名（参数在 hosts 页「设置」里调）。");
 
         cfAdapter = new CfAdapter();
         listCf = new ListView(this);
@@ -510,25 +612,44 @@ public class MainActivity extends Activity {
             }
         });
 
+        // 空状态提示
+        TextView tvEmptyCf = new TextView(this);
+        styleText(tvEmptyCf, COLOR_HINT, 16);
+        tvEmptyCf.setGravity(Gravity.CENTER);
+        tvEmptyCf.setText("尚未测速\n\n按上方「开始优选」获取 Cloudflare 优选 IP\n（可在 hosts 页「设置」里调参数）");
+        LinearLayout.LayoutParams lpEmpty = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        tvEmptyCf.setLayoutParams(lpEmpty);
+        listCf.setEmptyView(tvEmptyCf);
+
         root.addView(btnCfStart);
         root.addView(tvCfProgress);
         root.addView(listCf);
+        root.addView(tvEmptyCf);
         return root;
     }
 
     private void startCfOptimize() {
         if (cfRunning) {
-            toast("优选进行中，请稍候");
+            // 进行中再按 = 取消
+            if (cfOpt != null) cfOpt.cancel();
+            btnCfStart.setText("正在取消…");
             return;
         }
         cfRunning = true;
-        btnCfStart.setEnabled(false);
+        btnCfStart.setText("取消优选");
         cfResults.clear();
         cfAdapter.notifyDataSetChanged();
 
+        // 设置里的 CF 参数
+        int topN = prefs.getInt(PREF_CF_TOPN, 8);
+        int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
+        int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
+        final CfOptimizer opt = new CfOptimizer(sample, Math.max(16, sample / 13), topN, mb * 1024 * 1024);
+        cfOpt = opt;
+
         new Thread(new Runnable() {
             @Override public void run() {
-                CfOptimizer opt = new CfOptimizer();
                 try {
                     final List<CfOptimizer.Candidate> result = opt.optimize(new CfOptimizer.Progress() {
                         @Override public void onProgress(final String phase, final int done, final int total, final String detail) {
@@ -550,6 +671,12 @@ public class MainActivity extends Activity {
                             tvCfProgress.setText("优选完成，共 " + result.size() + " 个。选中某条 → 应用为指定域名的 IP");
                         }
                     });
+                } catch (final InterruptedException e) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            tvCfProgress.setText("已取消优选。");
+                        }
+                    });
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
@@ -558,8 +685,12 @@ public class MainActivity extends Activity {
                     });
                 } finally {
                     cfRunning = false;
+                    cfOpt = null;
                     runOnUiThread(new Runnable() {
-                        @Override public void run() { btnCfStart.setEnabled(true); }
+                        @Override public void run() {
+                            btnCfStart.setEnabled(true);
+                            btnCfStart.setText("开始优选（延迟 + 下载测速）");
+                        }
                     });
                 }
             }
@@ -583,19 +714,22 @@ public class MainActivity extends Activity {
         box.addView(etDomain);
         box.addView(buildDomainPicker(etDomain));
 
-        new AlertDialog.Builder(this)
+        AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("将优选 IP 写入 hosts")
                 .setView(box)
-                .setPositiveButton("写入", new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface d, int w) {
-                        String domain = etDomain.getText().toString().trim();
-                        if (domain.isEmpty()) { toast("域名为空"); return; }
-                        prefs.edit().putString("lastDomain", domain).apply();
-                        doUpsertAsync(domain, c.ip);
-                    }
-                })
+                .setPositiveButton("写入", null) // show() 后拦截，校验失败不关闭
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+        dlg.show();
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                String domain = etDomain.getText().toString().trim();
+                if (domain.isEmpty()) { toast("域名为空"); return; }
+                prefs.edit().putString("lastDomain", domain).apply();
+                dlg.dismiss();
+                doUpsertAsync(domain, c.ip);
+            }
+        });
     }
 
     // ==================== 通用 UI 辅助 ====================
@@ -729,8 +863,7 @@ public class MainActivity extends Activity {
             }
             HostsManager.Entry e = entries.get(position);
             tvMain.setText(e.host + "  →  " + e.ip);
-            tvSub.setText("行 " + (e.lineIndex + 1) + (e.comment != null ? " · 注释: " + e.comment : "")
-                    + " · 按 OK 删除");
+            tvSub.setText("行 " + (e.lineIndex + 1) + (e.comment != null ? " · 注释: " + e.comment : ""));
             return row;
         }
     }
@@ -765,8 +898,7 @@ public class MainActivity extends Activity {
             CfOptimizer.Candidate c = cfResults.get(position);
             tvMain.setText((position + 1) + ". " + c.ip);
             tvSub.setText("延迟 " + c.rttMs + "ms · "
-                    + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速")
-                    + " · 按 OK 应用到域名");
+                    + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速"));
             return row;
         }
     }
