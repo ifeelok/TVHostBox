@@ -1,7 +1,7 @@
 # TVHostBox · 电视Host管家
 
 适配 **移动魔百盒 CM311-1sa（Android 9，已 root）** 的电视端 hosts 管理工具。
-遥控器全程可操作，零第三方依赖（APK 仅 ~200KB）。
+遥控器全程可操作，零第三方依赖，APK 体积小巧。
 
 ![CI](https://github.com/ifeelok/TVHostBox/actions/workflows/android.yml/badge.svg)
 
