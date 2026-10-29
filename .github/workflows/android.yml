@@ -27,21 +27,17 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Generate signing keystore
-        run: |
-          keytool -genkeypair \
-            -keystore "$RUNNER_TEMP/hostbox.keystore" \
-            -alias hostbox \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass hostbox123 -keypass hostbox123 \
-            -dname "CN=HostBox, OU=Box, O=HostBox, C=CN"
+      - name: Restore signing keystore (from GitHub Secrets)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.HOSTBOX_KEYSTORE_BASE64 }}
+        run: echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/hostbox.keystore"
 
       - name: Build release APK
         env:
           HOSTBOX_KEYSTORE: ${{ runner.temp }}/hostbox.keystore
-          HOSTBOX_STORE_PASS: hostbox123
+          HOSTBOX_STORE_PASS: ${{ secrets.HOSTBOX_STORE_PASS }}
           HOSTBOX_KEY_ALIAS: hostbox
-          HOSTBOX_KEY_PASS: hostbox123
+          HOSTBOX_KEY_PASS: ${{ secrets.HOSTBOX_KEY_PASS }}
         run: gradle assembleRelease --no-daemon
 
       - name: Rename APK
