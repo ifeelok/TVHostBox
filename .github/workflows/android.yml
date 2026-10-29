@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 打 tag 时需要创建 Release 并上传 APK
     steps:
       - name: Checkout
         uses: actions/checkout@v4
