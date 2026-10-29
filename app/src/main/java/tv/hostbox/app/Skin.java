@@ -50,6 +50,35 @@ public final class Skin {
         return solid(t.card, t.border, 1, 16);
     }
 
+    /**
+     * 「框态」卡片：焦点落在整个列表框上时用。
+     * 描边换成强调色而不是直接用亮块 —— 列表里还要显示行，整块涂白会看不清内容。
+     */
+    public static Drawable cardFocus(Theme t) {
+        return solid(t.card, t.accent, 2, 16);
+    }
+
+    /** 顶栏下方的细分隔线（左浓右淡，一点点视觉层次） */
+    public static Drawable hairline(Theme t) {
+        GradientDrawable d = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{Theme.alpha(t.accent, 0.45f), Theme.alpha(t.border, 0.15f)});
+        d.setShape(GradientDrawable.RECTANGLE);
+        d.setCornerRadius(px(1));
+        return d;
+    }
+
+    /** 行首序号徽章 */
+    public static Drawable badge(Theme t, boolean strong) {
+        if (strong) return solid(Theme.alpha(t.accentDeep, 0.85f), 0, 0, 6);
+        return solid(Theme.alpha(t.accent, t.light ? 0.12f : 0.16f), 0, 0, 6);
+    }
+
+    /** 提示条 / 说明块底 */
+    public static Drawable strip(Theme t) {
+        return solid(Theme.alpha(t.surface, t.light ? 0.9f : 0.55f), t.border, 1, 11);
+    }
+
     // ==================== 按钮 ====================
 
     /** 普通操作按钮：暗块描边 → 光标上来变实心亮块 */
