@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#0B111C">
+    android:background="#0A1120">
 
     <!-- ===== 顶栏：品牌 + root 状态 ===== -->
     <LinearLayout
@@ -18,9 +19,9 @@
         android:paddingBottom="8dp">
 
         <TextView
+            android:id="@+id/brand_logo"
             android:layout_width="38dp"
             android:layout_height="38dp"
-            android:background="@drawable/bg_logo"
             android:gravity="center"
             android:text="H"
             android:textColor="#08131F"
@@ -35,6 +36,7 @@
             android:orientation="vertical">
 
             <TextView
+                android:id="@+id/brand_title"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="电视Host管家"
@@ -43,6 +45,7 @@
                 android:textStyle="bold" />
 
             <TextView
+                android:id="@+id/brand_sub"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="hosts 管理 · 手机配置 · Cloudflare 优选"
@@ -54,7 +57,6 @@
             android:id="@+id/root_pill"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:background="@drawable/bg_pill_neutral"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
             android:paddingTop="6dp"
