@@ -1937,7 +1937,7 @@ public class MainActivity extends Activity {
 
     private class CfSideList extends SideList {
         CfSideList() {
-            super(20, 15, "还没有优选结果\n\n按上方「开始优选」，等延迟和速度都跑完");
+            super(20, 15, "还没有优选结果\n\n按下方「开始优选」，等延迟和速度都跑完");
         }
         @Override int count() { return cfResults.size(); }
         @Override int idleColorFor(int position) {
