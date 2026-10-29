@@ -50,6 +50,13 @@ android {
             excludes += ['META-INF/*']
         }
     }
+
+    lint {
+        // 本应用只侧载到自有设备，不上 Google Play，
+        // 刻意保持 targetSdk 28（Android 9 盒子兼容性），关闭该检查
+        abortOnError false
+        disable 'ExpiredTargetSdkVersion'
+    }
 }
 
 dependencies {
