@@ -446,7 +446,6 @@ public class MainActivity extends Activity {
         addButtons(buttons, hostsButtonRow);
         wireButtonRow(hostsButtonRow, hostsList);
 
-        root.addView(title);
         // 标题与统计放同一行：窄屏（540dp 高）上能多留一行给列表
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
