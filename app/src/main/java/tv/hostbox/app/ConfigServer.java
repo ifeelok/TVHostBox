@@ -1,11 +1,19 @@
 package tv.hostbox.app;
 
-import java.io.BufferedReader;
 import java.io.BufferedWriter;
-import java.io.InputStreamReader;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.OutputStreamWriter;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URLDecoder;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -13,10 +21,12 @@ import java.util.concurrent.Executors;
  * 手机扫码配置用的极简 HTTP 服务器（零依赖）。
  *
  * 路由：
- *   GET  /          → 配置页（手机浏览器打开）
- *   GET  /api/raw   → 返回 hosts 全文
- *   POST /api/raw   → body 为新的 hosts 全文，校验后写入
- *   GET  /api/exit  → 停止服务器
+ *   GET  /            → 手机配置页（assets/mobile.html）
+ *   GET  /api/state   → 条目列表 + 盒子 IP 的 JSON
+ *   GET  /api/raw     → 返回 hosts 全文
+ *   POST /api/raw     → body 为新的 hosts 全文，校验后写入
+ *   POST /api/set     → form: ip=&domain=  新增/替换一条解析
+ *   POST /api/delete  → form: domain=      删除某域名的解析
  */
 public final class ConfigServer {
 
@@ -32,6 +42,7 @@ public final class ConfigServer {
     private static Thread acceptThread;
     private static final ExecutorService WORKERS = Executors.newCachedThreadPool();
     private static volatile StatusListener listener;
+    private static volatile String pageCache;
 
     private ConfigServer() {}
 
@@ -95,27 +106,42 @@ public final class ConfigServer {
 
     private static void handle(Socket s) {
         try {
-            BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
-            String requestLine = in.readLine();
+            InputStream is = s.getInputStream();
+
+            // 按字节读到 \r\n\r\n 为止：按字符读会把 content-length（字节数）
+            // 当成字符数，含中文注释的 hosts 会读不满而卡到超时
+            ByteArrayOutputStream headBuf = new ByteArrayOutputStream(1024);
+            int last4 = 0, b;
+            while ((b = is.read()) >= 0) {
+                headBuf.write(b);
+                last4 = (last4 << 8) | (b & 0xFF);
+                if (last4 == 0x0D0A0D0A) break;               // \r\n\r\n
+                if (headBuf.size() > 64 * 1024) return;        // 防异常长头
+            }
+            if (headBuf.size() == 0) return;
+
+            String[] headLines = new String(headBuf.toByteArray(), "ISO-8859-1").split("\r\n");
+            String requestLine = headLines[0];
             if (requestLine == null || requestLine.isEmpty()) return;
 
             int contentLength = 0;
-            String line;
-            while ((line = in.readLine()) != null && !line.isEmpty()) {
-                String lower = line.toLowerCase();
-                if (lower.startsWith("content-length:")) {
-                    try { contentLength = Integer.parseInt(line.substring(15).trim()); } catch (Exception ignored) {}
+            for (int i = 1; i < headLines.length; i++) {
+                int c = headLines[i].indexOf(':');
+                if (c > 0 && headLines[i].substring(0, c).trim().equalsIgnoreCase("Content-Length")) {
+                    try { contentLength = Integer.parseInt(headLines[i].substring(c + 1).trim()); }
+                    catch (Exception ignored) {}
                 }
             }
+            if (contentLength < 0 || contentLength > 4 * 1024 * 1024) contentLength = 0;
 
-            char[] bodyChars = new char[contentLength];
+            byte[] bodyBytes = new byte[contentLength];
             int read = 0;
             while (read < contentLength) {
-                int n = in.read(bodyChars, read, contentLength - read);
+                int n = is.read(bodyBytes, read, contentLength - read);
                 if (n < 0) break;
                 read += n;
             }
-            String body = new String(bodyChars, 0, read);
+            String body = new String(bodyBytes, 0, read, "UTF-8");
 
             String[] parts = requestLine.split("\\s+");
             String method = parts[0];
@@ -123,12 +149,12 @@ public final class ConfigServer {
             if (path.contains("?")) path = path.substring(0, path.indexOf('?'));
 
             if ("GET".equals(method) && "/".equals(path)) {
-                respond(s, 200, "text/html; charset=utf-8", buildPage());
+                respond(s, 200, "text/html; charset=utf-8", mobilePage());
+            } else if ("GET".equals(method) && "/api/state".equals(path)) {
+                respond(s, 200, "application/json; charset=utf-8", buildStateJson());
             } else if ("GET".equals(method) && "/api/raw".equals(path)) {
-                String raw;
                 try {
-                    raw = HostsManager.readRaw();
-                    respond(s, 200, "text/plain; charset=utf-8", raw);
+                    respond(s, 200, "text/plain; charset=utf-8", HostsManager.readRaw());
                 } catch (Exception e) {
                     respond(s, 500, "text/plain; charset=utf-8", "read error: " + e);
                 }
@@ -140,7 +166,40 @@ public final class ConfigServer {
                 }
                 err = HostsManager.writeRaw(body);
                 if (err == null) {
-                    respond(s, 200, "text/plain; charset=utf-8", "OK 已写入并回读校验通过");
+                    respond(s, 200, "text/plain; charset=utf-8", "已写入并回读校验通过");
+                    notifyDataChanged();
+                } else {
+                    respond(s, 500, "text/plain; charset=utf-8", err);
+                }
+            } else if ("POST".equals(method) && "/api/set".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String ip = f.get("ip");
+                String domain = f.get("domain");
+                if (ip == null || !HostsManager.isValidIp(ip.trim())) {
+                    respond(s, 400, "text/plain; charset=utf-8", "IP 无效：" + ip);
+                    return;
+                }
+                if (domain == null || !domain.trim().matches("(?i)[a-z0-9._\\-]+")) {
+                    respond(s, 400, "text/plain; charset=utf-8", "域名无效：" + domain);
+                    return;
+                }
+                String err = HostsManager.upsert(domain.trim(), ip.trim());
+                if (err == null) {
+                    respond(s, 200, "text/plain; charset=utf-8", "已保存");
+                    notifyDataChanged();
+                } else {
+                    respond(s, 500, "text/plain; charset=utf-8", err);
+                }
+            } else if ("POST".equals(method) && "/api/delete".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String domain = f.get("domain");
+                if (domain == null || domain.trim().isEmpty()) {
+                    respond(s, 400, "text/plain; charset=utf-8", "缺少 domain");
+                    return;
+                }
+                String err = HostsManager.remove(domain.trim());
+                if (err == null) {
+                    respond(s, 200, "text/plain; charset=utf-8", "已删除");
                     notifyDataChanged();
                 } else {
                     respond(s, 500, "text/plain; charset=utf-8", err);
@@ -155,12 +214,95 @@ public final class ConfigServer {
         }
     }
 
+    private static Map<String, String> parseForm(String body) {
+        Map<String, String> map = new HashMap<String, String>();
+        if (body == null) return map;
+        for (String pair : body.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                String k = URLDecoder.decode(pair.substring(0, eq), "UTF-8");
+                String v = URLDecoder.decode(pair.substring(eq + 1), "UTF-8");
+                map.put(k, v);
+            } catch (Exception ignored) {}
+        }
+        return map;
+    }
+
     private static String validateAll(String content) {
         String[] lines = content.split("\n");
         for (int i = 0; i < lines.length; i++) {
             String err = HostsManager.validateLine(lines[i]);
             if (err != null) return "第 " + (i + 1) + " 行有误：" + err;
         }
+        return null;
+    }
+
+    /** 手机端状态：盒子地址 + 解析条目列表 */
+    private static String buildStateJson() {
+        StringBuilder sb = new StringBuilder(512);
+        String ip = localIp();
+        sb.append("{\"ip\":\"").append(ip == null ? "" : ip).append('"')
+          .append(",\"port\":").append(PORT);
+        int bytes = 0;
+        try {
+            String raw = HostsManager.readRaw();
+            bytes = raw.length();
+            List<HostsManager.Entry> list = HostsManager.parse(raw);
+            sb.append(",\"bytes\":").append(bytes).append(",\"entries\":[");
+            for (int i = 0; i < list.size(); i++) {
+                HostsManager.Entry e = list.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"ip\":\"").append(jsonEscape(e.ip)).append('"')
+                  .append(",\"host\":\"").append(jsonEscape(e.host)).append('"')
+                  .append(",\"comment\":").append(e.comment == null
+                        ? "null" : "\"" + jsonEscape(e.comment) + "\"")
+                  .append(",\"line\":").append(e.lineIndex + 1)
+                  .append('}');
+            }
+            sb.append(']');
+        } catch (Exception e) {
+            sb.append(",\"bytes\":0,\"entries\":[],\"error\":\"")
+              .append(jsonEscape(String.valueOf(e.getMessage()))).append('"');
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+                    else sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String localIp() {
+        try {
+            Enumeration<NetworkInterface> nis = NetworkInterface.getNetworkInterfaces();
+            while (nis.hasMoreElements()) {
+                NetworkInterface ni = nis.nextElement();
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                Enumeration<InetAddress> addrs = ni.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress a = addrs.nextElement();
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
         return null;
     }
 
@@ -171,6 +313,7 @@ public final class ConfigServer {
             w.write("HTTP/1.1 " + code + " " + (code == 200 ? "OK" : "ERR") + "\r\n");
             w.write("Content-Type: " + type + "\r\n");
             w.write("Content-Length: " + data.length + "\r\n");
+            w.write("Cache-Control: no-store\r\n");
             w.write("Connection: close\r\n\r\n");
             w.flush();
             s.getOutputStream().write(data);
@@ -180,48 +323,27 @@ public final class ConfigServer {
 
     // ===================== 配置页 =====================
 
-    private static String buildPage() {
-        return "<!DOCTYPE html>\n"
-            + "<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-            + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            + "<title>Host管家 · 配置</title>"
-            + "<style>"
-            + "body{font-family:-apple-system,sans-serif;background:#0e1420;color:#e6eaf2;margin:0;padding:16px;max-width:720px;margin:0 auto}"
-            + "h1{font-size:20px;margin:8px 0}p.tip{color:#9aa7bd;font-size:13px}"
-            + "textarea{width:100%;height:45vh;background:#161e2e;color:#d6e2ff;border:1px solid #2a3854;border-radius:8px;padding:10px;font-size:13px;line-height:1.5;box-sizing:border-box;font-family:monospace}"
-            + "button{background:#2f7cf6;color:#fff;border:0;border-radius:8px;padding:12px 22px;font-size:16px;margin:8px 4px 0 0}"
-            + "button.gray{background:#3a4a66}"
-            + "#msg{margin-top:10px;font-size:14px;white-space:pre-wrap}"
-            + ".row{display:flex;gap:8px;margin-top:10px}"
-            + "input{flex:1;background:#161e2e;color:#d6e2ff;border:1px solid #2a3854;border-radius:8px;padding:10px;font-size:14px}"
-            + "</style></head><body>"
-            + "<h1>Host管家 · 手机配置</h1>"
-            + "<p class=\"tip\">直接编辑下方 hosts 全文（每行一条：IP 域名），保存后写入盒子 /system/etc/hosts 并自动备份。</p>"
-            + "<div class=\"row\">"
-            + "<input id=\"ip\" placeholder=\"优选 IP，如 104.17.142.159\">"
-            + "<input id=\"domain\" placeholder=\"域名，如 emby-proxy.example.com\">"
-            + "<button class=\"gray\" onclick=\"addLine()\">追加</button>"
-            + "</div>"
-            + "<textarea id=\"content\" spellcheck=\"false\"></textarea>"
-            + "<div>"
-            + "<button onclick=\"save()\">保存写入</button>"
-            + "<button class=\"gray\" onclick=\"load()\">重新加载</button>"
-            + "</div>"
-            + "<div id=\"msg\"></div>"
-            + "<script>"
-            + "function load(){fetch('/api/raw').then(r=>r.text()).then(t=>{document.getElementById('content').value=t;msg('已加载当前 hosts');})}"
-            + "function save(){fetch('/api/raw',{method:'POST',body:document.getElementById('content').value})"
-            + ".then(r=>r.text().then(t=>msg((r.ok?'✅ ':'❌ ')+t)))}"
-            + "function addLine(){var ip=document.getElementById('ip').value.trim();var d=document.getElementById('domain').value.trim();"
-            + "if(!ip||!d){msg('请先填写 IP 和域名');return}"
-            + "var ta=document.getElementById('content');var v=ta.value.replace(/\\n*$/,'\\n');"
-            + "var lines=v.split('\\n');var found=false;"
-            + "for(var i=0;i<lines.length;i++){var parts=lines[i].trim().split(/\\s+/);"
-            + "if(parts.length>=2&&parts[1].toLowerCase()===d.toLowerCase()){lines[i]=ip+'  '+d;found=true}}"
-            + "ta.value=lines.join('\\n')+(found?'':'\\n'+ip+'  '+d);"
-            + "msg(found?'已替换 '+d+' 的条目':'已在末尾追加');}"
-            + "function msg(t){document.getElementById('msg').textContent=t}"
-            + "load();"
-            + "</script></body></html>";
+    /** 读取 assets/mobile.html（首次读入后常驻内存） */
+    private static String mobilePage() {
+        String cached = pageCache;
+        if (cached != null) return cached;
+        try {
+            InputStream is = AppContextHolder.get().getAssets().open("mobile.html");
+            try {
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+                cached = new String(bos.toByteArray(), "UTF-8");
+            } finally {
+                is.close();
+            }
+            pageCache = cached;
+            return cached;
+        } catch (Exception e) {
+            return "<!DOCTYPE html><meta charset=utf-8>"
+                    + "<body style='background:#0B111C;color:#E8EDF6;font-family:sans-serif;padding:24px'>"
+                    + "<h2>页面加载失败</h2><p>" + e + "</p></body>";
+        }
     }
 }

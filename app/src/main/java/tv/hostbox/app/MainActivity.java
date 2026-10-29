@@ -45,6 +45,7 @@ public class MainActivity extends Activity {
     private Button navHostsBtn, navQrBtn, navCfBtn;
     private LinearLayout panelHosts, panelQr, panelCf;
     private Button btnQrRefresh;
+    private Button btnQrService;
     private Button btnHostsRefresh;
 
     // Hosts 面板
@@ -231,6 +232,43 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 列表滚到第一项时再按「上」→ 焦点回到页签（否则焦点会被困在内容区） */
+    private void wireUpToNav(final ListView list, final View navBtn) {
+        list.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP
+                        && list.getSelectedItemPosition() <= 0) {
+                    return navBtn != null && navBtn.requestFocus();
+                }
+                return false;
+            }
+        });
+    }
+
+    /**
+     * 底部按钮行：左右键显式在按钮间移动（不依赖 FocusFinder），
+     * 第一个按钮按「上」回到内容区。
+     */
+    private void wireButtonRow(final Button[] row, final View upTarget) {
+        for (int i = 0; i < row.length; i++) {
+            final int idx = i;
+            row[i].setOnKeyListener(new View.OnKeyListener() {
+                @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                    if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP && upTarget != null) {
+                        return upTarget.requestFocus();
+                    }
+                    int next = -1;
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) next = idx - 1;
+                    else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) next = idx + 1;
+                    if (next < 0 || next >= row.length) return false;
+                    return row[next].requestFocus();
+                }
+            });
+        }
+    }
+
     // ==================== Tab 0: Hosts 管理 ====================
 
     private LinearLayout buildHostsPanel() {
@@ -256,6 +294,10 @@ public class MainActivity extends Activity {
         listHosts.setLayoutParams(lp);
         listHosts.setBackgroundColor(COLOR_PANEL);
         listHosts.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
+        listHosts.setDivider(null);
+        listHosts.setDividerHeight(0);
+        // 首项再按「上」＝把焦点交回页签，避免焦点被困在列表里出不去
+        wireUpToNav(listHosts, navHostsBtn);
         listHosts.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (position < 0 || position >= entries.size()) return;
@@ -288,16 +330,20 @@ public class MainActivity extends Activity {
         btnHostsRefresh = actionButton("刷新", new View.OnClickListener() {
             @Override public void onClick(View v) { loadHostsAsync(); }
         });
-        buttons.addView(btnHostsRefresh);
-        buttons.addView(actionButton("添加条目", new View.OnClickListener() {
+        Button btnAdd = actionButton("添加条目", new View.OnClickListener() {
             @Override public void onClick(View v) { showAddDialog(); }
-        }));
-        buttons.addView(actionButton("备份列表", new View.OnClickListener() {
+        });
+        Button btnBackup = actionButton("备份列表", new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
-        }));
-        buttons.addView(actionButton("设置", new View.OnClickListener() {
+        });
+        Button btnSettings = actionButton("设置", new View.OnClickListener() {
             @Override public void onClick(View v) { showSettingsDialog(); }
-        }));
+        });
+        buttons.addView(btnHostsRefresh);
+        buttons.addView(btnAdd);
+        buttons.addView(btnBackup);
+        buttons.addView(btnSettings);
+        wireButtonRow(new Button[]{btnHostsRefresh, btnAdd, btnBackup, btnSettings}, listHosts);
 
         root.addView(tvRootStatus);
         root.addView(title);
@@ -318,8 +364,10 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             entries = parsed;
+                            hostsAdapter.clampSelected();
                             hostsAdapter.notifyDataSetChanged();
-                            tvHostsSummary.setText("共 " + entries.size() + " 条解析记录 · 文件 " + raw.length() + " 字节");
+                            tvHostsSummary.setText("共 " + entries.size() + " 条解析记录 · 文件 "
+                                    + raw.length() + " 字节");
                         }
                     });
                 } catch (final Exception e) {
@@ -350,7 +398,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDelete(final HostsManager.Entry e) {
-        new AlertDialog.Builder(this)
+        final AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("删除该条？")
                 .setMessage(e.host + " → " + e.ip)
                 .setPositiveButton("删除", new android.content.DialogInterface.OnClickListener() {
@@ -359,7 +407,14 @@ public class MainActivity extends Activity {
                     }
                 })
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+        // 默认焦点放在「取消」上：遥控器误按 OK 不会直接删掉条目
+        dlg.setOnShowListener(new android.content.DialogInterface.OnShowListener() {
+            @Override public void onShow(android.content.DialogInterface d) {
+                dlg.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus();
+            }
+        });
+        dlg.show();
     }
 
     private void doRemoveAsync(final String domain) {
@@ -372,6 +427,7 @@ public class MainActivity extends Activity {
                         showActionResult(err == null,
                                 err == null ? "✔ 已删除 " + domain : "✘ 删除失败：" + err);
                         loadHostsAsync();
+                        if (listHosts != null) listHosts.requestFocus();
                     }
                 });
             }
@@ -433,6 +489,7 @@ public class MainActivity extends Activity {
                                 err == null ? "✔ 写入成功 " + domain + " → " + ip + "（原文件已备份）"
                                         : "✘ 写入失败：" + err);
                         loadHostsAsync();
+                        if (listHosts != null) listHosts.requestFocus();
                     }
                 });
             }
@@ -486,17 +543,44 @@ public class MainActivity extends Activity {
         for (int i = 0; i < values.length; i++) {
             if (values[i] == current) { checked = i; break; }
         }
-        new AlertDialog.Builder(this)
+        final AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle(title)
                 .setSingleChoiceItems(labels, checked, new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface d, int w) {
                         prefs.edit().putInt(key, values[w]).apply();
                         d.dismiss();
                         toast("已设置：" + labels[w]);
+                        // 改完回到设置总览，便于连续调多项，不用一层层重新进
+                        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
+                            @Override public void run() { showSettingsDialog(); }
+                        }, 240);
                     }
                 })
                 .setNegativeButton("取消", null)
-                .show();
+                .create();
+        // 选项多时滚到当前生效值，遥控器不用自己找
+        final int checkedIdx = checked;
+        dlg.setOnShowListener(new android.content.DialogInterface.OnShowListener() {
+            @Override public void onShow(android.content.DialogInterface d) {
+                if (dlg.getListView() != null && checkedIdx >= 0) {
+                    dlg.getListView().setSelection(checkedIdx);
+                }
+            }
+        });
+        dlg.show();
+    }
+
+    /** hosts.bak.20261029_101010 → 2026-10-29 10:10:10（电视上比原始文件名好认） */
+    private String prettyBackupName(String name) {
+        String s = name.startsWith("hosts.bak.") ? name.substring("hosts.bak.".length()) : name;
+        boolean beforeRestore = s.contains("_before_restore");
+        s = s.replace("_before_restore", "");
+        if (s.matches("\\d{8}_\\d{6}")) {
+            s = s.substring(0, 4) + "-" + s.substring(4, 6) + "-" + s.substring(6, 8)
+                    + "   " + s.substring(9, 11) + ":" + s.substring(11, 13)
+                    + ":" + s.substring(13, 15);
+        }
+        return s + (beforeRestore ? "   （恢复前自动备份）" : "");
     }
 
     private void showBackupList() {
@@ -510,9 +594,13 @@ public class MainActivity extends Activity {
                             return;
                         }
                         Collections.reverse(backups); // 新→旧
+                        final String[] labels = new String[backups.size()];
+                        for (int i = 0; i < backups.size(); i++) {
+                            labels[i] = prettyBackupName(backups.get(i));
+                        }
                         new AlertDialog.Builder(MainActivity.this)
                                 .setTitle("选择要恢复的备份（共 " + backups.size() + " 个，新→旧）")
-                                .setItems(backups.toArray(new String[0]),
+                                .setItems(labels,
                                         new android.content.DialogInterface.OnClickListener() {
                                     @Override public void onClick(android.content.DialogInterface d, int w) {
                                         // w 是索引，取对应名字
@@ -547,7 +635,7 @@ public class MainActivity extends Activity {
 
         TextView tip = new TextView(this);
         styleText(tip, COLOR_HINT, 16);
-        tip.setText("用手机「相机 / 微信扫一扫」扫描二维码，在手机浏览器里编辑 hosts 并保存");
+        tip.setText("手机扫码后可在网页里增删条目、批量编辑，保存后自动备份到 /sdcard/hostbox");
 
         imgQr = new ImageView(this);
         // 按屏幕宽度自适应，避免低分辨率/小屏盒子溢出（不超过屏宽 45%）
@@ -573,12 +661,19 @@ public class MainActivity extends Activity {
         btnQrRefresh = actionButton("刷新二维码", new View.OnClickListener() {
             @Override public void onClick(View v) { refreshQr(); }
         });
-        buttons.addView(btnQrRefresh);
-        buttons.addView(actionButton("停止/启动服务", new View.OnClickListener() {
+        btnQrService = actionButton("启动/停止服务", new View.OnClickListener() {
             @Override public void onClick(View v) {
-                if (ConfigServer.isRunning()) ConfigServer.stop(); else startServer();
+                if (ConfigServer.isRunning()) {
+                    ConfigServer.stop();
+                    refreshQr();
+                } else {
+                    startServer();
+                }
             }
-        }));
+        });
+        buttons.addView(btnQrRefresh);
+        buttons.addView(btnQrService);
+        wireButtonRow(new Button[]{btnQrRefresh, btnQrService}, null);
 
         root.addView(tip);
         root.addView(imgQr);
@@ -593,6 +688,9 @@ public class MainActivity extends Activity {
             @Override public void run() {
                 try {
                     ConfigServer.start();
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() { refreshQr(); }
+                    });
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
@@ -606,6 +704,15 @@ public class MainActivity extends Activity {
     }
 
     private void refreshQr() {
+        boolean running = ConfigServer.isRunning();
+        if (tvServerStatus != null) {
+            tvServerStatus.setText(running
+                    ? "配置服务已启动 · 手机需与盒子连同一个 Wi-Fi"
+                    : "配置服务已停止 · 先点「启动服务」再扫码");
+            tvServerStatus.setTextColor(running ? COLOR_HINT : COLOR_DANGER);
+        }
+        if (btnQrService != null) btnQrService.setText(running ? "停止服务" : "启动服务");
+
         String ip = getBoxIp();
         if (ip == null) {
             tvQrUrl.setText("未获取到盒子 IP，请确认网络已连接");
@@ -668,6 +775,9 @@ public class MainActivity extends Activity {
         listCf.setLayoutParams(lp);
         listCf.setBackgroundColor(COLOR_PANEL);
         listCf.setSelector(new android.graphics.drawable.ColorDrawable(0x00000000));
+        listCf.setDivider(null);
+        listCf.setDividerHeight(0);
+        wireUpToNav(listCf, navCfBtn);
         listCf.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
                 if (position < 0 || position >= cfResults.size()) return;
@@ -736,8 +846,12 @@ public class MainActivity extends Activity {
                         @Override public void run() {
                             cfResults.clear();
                             cfResults.addAll(result);
+                            cfAdapter.clampSelected();
                             cfAdapter.notifyDataSetChanged();
-                            tvCfProgress.setText("优选完成，共 " + result.size() + " 个。选中某条 → 应用为指定域名的 IP");
+                            tvCfProgress.setText("优选完成，共 " + result.size()
+                                    + " 个。选中某条按 OK → 应用为指定域名的 IP");
+                            // 结果出来后焦点直接进列表，少按一次方向键
+                            if (!result.isEmpty() && listCf != null) listCf.requestFocus();
                         }
                     });
                 } catch (final InterruptedException e) {
@@ -790,6 +904,12 @@ public class MainActivity extends Activity {
                 .setNegativeButton("取消", null)
                 .create();
         dlg.show();
+        // 域名已预填时直接聚焦「写入」，避免遥控器一按 OK 就弹出软键盘挡住半屏
+        if (etDomain.getText().toString().trim().isEmpty()) {
+            etDomain.requestFocus();
+        } else {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus();
+        }
         dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 String domain = etDomain.getText().toString().trim();
@@ -907,6 +1027,12 @@ public class MainActivity extends Activity {
         /** 当前选中行：ListView 的行拿不到 focus，只能自己记位置并主动高亮 */
         int selPos = 0;
 
+        /** 删除/刷新后条目变少时，避免选中位置越界导致没有任何高亮行 */
+        void clampSelected() {
+            if (selPos >= entries.size()) selPos = Math.max(0, entries.size() - 1);
+            if (selPos < 0) selPos = 0;
+        }
+
         void setSelected(int p) {
             if (p != selPos && p >= 0) {
                 selPos = p;
@@ -925,11 +1051,15 @@ public class MainActivity extends Activity {
                 row = new LinearLayout(MainActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
                 int pad = dp(12);
-                row.setPadding(pad, pad, pad, pad);
+                row.setPadding(pad, dp(9), pad, dp(9));
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 18);
+                tvMain.setSingleLine(true);
+                tvMain.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 tvSub = new TextView(MainActivity.this);
                 styleText(tvSub, COLOR_HINT, 13);
+                tvSub.setSingleLine(true);
+                tvSub.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 row.addView(tvMain);
                 row.addView(tvSub);
                 row.setTag(new TextView[]{tvMain, tvSub});
@@ -945,8 +1075,10 @@ public class MainActivity extends Activity {
             tvSub.setTextColor(sel ? 0xFFB3E5FC : COLOR_HINT);
 
             HostsManager.Entry e = entries.get(position);
-            tvMain.setText(e.host + "  →  " + e.ip);
-            tvSub.setText("行 " + (e.lineIndex + 1) + (e.comment != null ? " · 注释: " + e.comment : ""));
+            tvMain.setText(e.host);
+            String sub = e.ip + "   ·   第 " + (e.lineIndex + 1) + " 行";
+            if (e.comment != null && !e.comment.isEmpty()) sub += "   ·   " + e.comment;
+            tvSub.setText(sub);
             return row;
         }
     }
@@ -954,6 +1086,11 @@ public class MainActivity extends Activity {
     private class CfAdapter extends BaseAdapter {
         /** 当前选中行：见 HostsAdapter 说明 */
         int selPos = 0;
+
+        void clampSelected() {
+            if (selPos >= cfResults.size()) selPos = Math.max(0, cfResults.size() - 1);
+            if (selPos < 0) selPos = 0;
+        }
 
         void setSelected(int p) {
             if (p != selPos && p >= 0) {
@@ -972,12 +1109,13 @@ public class MainActivity extends Activity {
             if (convertView == null) {
                 row = new LinearLayout(MainActivity.this);
                 row.setOrientation(LinearLayout.VERTICAL);
-                int pad = dp(12);
-                row.setPadding(pad, pad, pad, pad);
+                row.setPadding(dp(12), dp(9), dp(12), dp(9));
                 tvMain = new TextView(MainActivity.this);
                 styleText(tvMain, COLOR_TEXT, 20);
+                tvMain.setSingleLine(true);
                 tvSub = new TextView(MainActivity.this);
                 styleText(tvSub, COLOR_HINT, 15);
+                tvSub.setSingleLine(true);
                 row.addView(tvMain);
                 row.addView(tvSub);
                 row.setTag(new TextView[]{tvMain, tvSub});
@@ -989,13 +1127,17 @@ public class MainActivity extends Activity {
             }
             boolean sel = position == selPos;
             row.setBackgroundResource(sel ? R.drawable.row_tv_sel : R.drawable.row_tv);
-            tvMain.setTextColor(sel ? COLOR_ACCENT : COLOR_TEXT);
-            tvSub.setTextColor(sel ? 0xFFB3E5FC : COLOR_HINT);
 
             CfOptimizer.Candidate c = cfResults.get(position);
-            tvMain.setText((position + 1) + ". " + c.ip);
-            tvSub.setText("延迟 " + c.rttMs + "ms · "
-                    + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速"));
+            boolean speedOk = c.mbps > 0;
+            // 有速度的才是真正"优选"结果，未测速的排后面并用灰色弱化
+            tvMain.setTextColor(sel ? COLOR_ACCENT : (speedOk ? COLOR_TEXT : COLOR_HINT));
+            tvSub.setTextColor(sel ? 0xFFB3E5FC : COLOR_HINT);
+
+            tvMain.setText("No." + (position + 1) + "   " + c.ip);
+            String speed = speedOk ? String.format("%.1f Mbps", c.mbps) : "未测速";
+            tvSub.setText("延迟 " + c.rttMs + " ms   ·   " + speed
+                    + (speedOk ? "" : "（仅延迟可用，可先试用）"));
             return row;
         }
     }
