@@ -122,6 +122,9 @@ public class MainActivity extends Activity {
     private String livePhase = "";
     private int liveDone = 0, liveTotal = 0;
     private String liveLast = "";
+    /** 段首小结（延迟段→测速段）：只显示两三秒，把「通了几个、谁进测速」先说清楚 */
+    private String liveBanner = "";
+    private long liveBannerAt = 0;
     private boolean liveRenderQueued = false;
 
     /** 主线程渲染句柄：过程回调非常密集（采样 320 个 IP），必须限流后再画 */
@@ -1818,7 +1821,8 @@ public class MainActivity extends Activity {
      *
      * 之前跑优选时，中间一大块只有一句「TCP 延迟测试中…」，每个 IP 的结果一行闪过、
      * 跑完就没了——用户既看不出在测什么，也判断不了质量分布。这里把过程本身画成一张表：
-     * 序号 / IP / 质量条 / 延迟或速度，按「当前最好的排前面」实时刷新。
+     * 序号 / IP / 质量条 / 延迟或速度，新的往下追加、旧的往上顶（扫描流水账），
+     * 段的边界给一句小结，跑完再切成绩单。
      */
     private LinearLayout buildCfLiveBoard() {
         LinearLayout card = new LinearLayout(this);
@@ -1997,7 +2001,8 @@ public class MainActivity extends Activity {
         r.rank.setTypeface(android.graphics.Typeface.MONOSPACE);
         r.rank.setTextColor(COLOR_HINT);
         r.rank.setBackground(Skin.badge(th, false));
-        row.addView(r.rank, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        // 序号列要放下三位数（最多 320 个 IP），24dp 会挤成椭圆
+        row.addView(r.rank, new LinearLayout.LayoutParams(dp(32), dp(24)));
 
         r.ip = new TextView(this);
         r.ip.setTextColor(COLOR_TEXT);
@@ -2113,12 +2118,12 @@ public class MainActivity extends Activity {
                 synchronized (liveLock) {
                     setLivePhase("latency");   // 内部判重，第一次调用才清表
                     liveDone++;
-                    if (rttMs >= 0) {
-                        CfOptimizer.Candidate c = new CfOptimizer.Candidate(ip);
-                        c.rttMs = rttMs;
-                        liveLat.add(c);
-                    }
-                    liveLast = ip + (rttMs >= 0 ? "  →  " + rttMs + " ms" : "  →  不通");
+                    // 不通的也留在流水里（rtt=-1）：整段扫描到底扫过哪些、有多少超时，
+                    // 才是"过程"本身。以前只收通的，表里永远是稀疏的十几个。
+                    CfOptimizer.Candidate c = new CfOptimizer.Candidate(ip);
+                    c.rttMs = rttMs;
+                    liveLat.add(c);
+                    liveLast = ip + (rttMs >= 0 ? "  →  " + rttMs + " ms" : "  →  超时");
                 }
                 scheduleLiveRender();
             }
@@ -2248,6 +2253,7 @@ public class MainActivity extends Activity {
                 liveSpeed.clear();
                 liveDone = 0;
                 liveLast = "";
+                liveBanner = "";
             } else if ("speed".equals(phase)) {
                 // 进测速阶段只清测速侧，liveLat 必须留着：
                 // ① 测速表每行的「延迟」列要靠它回填；② 跑完回看时整场过程不能缺延迟段。
@@ -2256,6 +2262,14 @@ public class MainActivity extends Activity {
                 liveSpeed.clear();
                 liveDone = 0;
                 liveLast = "";
+                // 段末小结：延迟段跑了多少、通了多少，接下来测哪一批
+                int pass = 0;
+                for (int i = 0; i < liveLat.size(); i++) {
+                    if (liveLat.get(i).rttMs >= 0) pass++;
+                }
+                liveBanner = "延迟段完成    ·    通 " + pass + " / " + liveLat.size()
+                        + " 个    ·    开始给最快的一批测速";
+                liveBannerAt = System.currentTimeMillis();
             }
         }
     }
@@ -2341,31 +2355,47 @@ public class MainActivity extends Activity {
         return n < 10 ? "0" + n : String.valueOf(n);
     }
 
+    /** 扫描序号最多到 320，三位对齐才不会让整列跳宽跳窄 */
+    private static String pad3(int n) {
+        return n < 10 ? "00" + n : n < 100 ? "0" + n : String.valueOf(n);
+    }
+
+    // ==================== 过程表：扫描流水账 ====================
+    // 改版原因：旧版把表当"排行榜"——延迟段按 rtt 排序、测速段整表换成另一批数据。
+    // 排序意味着每来一个 IP 行序整体重排，眼睛追不上；阶段切换又"整表消失"，像数据丢了。
+    // 现在改成扫描流水账：
+    //   · 延迟段：每测完一个 IP 就往表尾追加一行（通=ms，不通=超时），只保留最近 N 行；
+    //   · 段末：底部给一句小结（通几个 / 哪批进测速），停留两三秒；
+    //   · 测速段：同样追加，先"测速中…"再原地变 Mbps，旁边挂延迟；
+    //   · 跑完：结果列表接管（可访问清单），回看才按成绩排序。
+    // View 数恒等于 N（窗口复用同一批行），320 个 IP 也不会堆出上千个 View。
+
     private void renderLiveBoard() {
         if (cfLive == null || cfLive.getVisibility() != View.VISIBLE) return;
-        final String renderPhase = cfFinished ? "review" : livePhase;
-        // 跑完后再打开这张表就是「回看」，标题换成回顾口吻，别让人以为还在跑
-        final String pfx = cfFinished ? "测试回顾 · " : "实时测试 · ";
-        ensureLiveRows();   // 首次布局完成后才知道能放几行
-        String phase;
+        final boolean review = cfFinished;
+        ensureLiveRows();          // 首次布局完成后才知道能放几行
+
+        String phase, last, banner;
         int done, total;
-        String last;
+        long bannerAt;
         List<CfOptimizer.Candidate> lat = null, sp = null;
         synchronized (liveLock) {
             phase = livePhase;
             done = liveDone;
             total = liveTotal;
             last = liveLast;
+            banner = liveBanner;
+            bannerAt = liveBannerAt;
             if ("latency".equals(phase)) lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
             else if ("speed".equals(phase)) {
                 sp = new ArrayList<CfOptimizer.Candidate>(liveSpeed);
-                // 测速阶段也要把每个 IP 的延迟带出来：速度快的 IP 延迟可能很差，
-                // 只给 Mbps 没法判断这一条到底适不适合用
+                // 测速段也要把延迟带出来：速度快但延迟差的 IP 未必好用
                 lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
             }
         }
 
-        // 换了阶段（或切入回顾）就把表滚回第一行，别让人接着看上一次滚到一半的位置
+        // 换阶段（或切入回顾）时从第一行重新开始，别接着看上一段的位置
+        final String renderPhase = review ? "review" : phase;
         if (liveScroll != null && !renderPhase.equals(lastPhaseRendered)) {
             lastPhaseRendered = renderPhase;
             liveScroll.post(new Runnable() {
@@ -2373,108 +2403,174 @@ public class MainActivity extends Activity {
             });
         }
 
-        // 测速阶段 lat 和 sp 都有快照（lat 仅供延迟列回填），必须按阶段分流：
-        // 以前按「lat 非空」优先，测速阶段和回看永远落进延迟分支，表上一片空白。
-        if (lat != null && !"speed".equals(phase)) {
-            Collections.sort(lat, new java.util.Comparator<CfOptimizer.Candidate>() {
+        if (sp != null) renderSpeedStage(review, sp, lat, done, total, last, banner, bannerAt);
+        else if (lat != null) renderLatencyStage(review, lat, done, total, last);
+        else renderSampleStage(review);
+    }
+
+    /** 延迟段：所有扫过的 IP 都进流水（不通的也留着，看得见扫描密度） */
+    private void renderLatencyStage(boolean review, List<CfOptimizer.Candidate> lat,
+                                    int done, int total, String last) {
+        int pass = 0, best = Integer.MAX_VALUE;
+        for (int i = 0; i < lat.size(); i++) {
+            CfOptimizer.Candidate c = lat.get(i);
+            if (c.rttMs >= 0) {
+                pass++;
+                if (c.rttMs < best) best = c.rttMs;
+            }
+        }
+        cfLiveTitle.setText(review ? "测试回顾 · 延迟扫描" : "实时测试 · 延迟扫描");
+        setLiveHead(true, false);
+        cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
+                + "   ·   通 " + pass
+                + (best != Integer.MAX_VALUE ? "   ·   最快 " + best + " ms" : ""));
+
+        // 回看给成绩单（只列通的、按延迟升序）；实时给流水（原始顺序 + 尾部窗口）
+        List<CfOptimizer.Candidate> view;
+        int seqFrom = 0;
+        if (review) {
+            view = new ArrayList<CfOptimizer.Candidate>();
+            for (int i = 0; i < lat.size(); i++) {
+                if (lat.get(i).rttMs >= 0) view.add(lat.get(i));
+            }
+            Collections.sort(view, new java.util.Comparator<CfOptimizer.Candidate>() {
                 @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
                     return Integer.compare(a.rttMs, b.rttMs);
                 }
             });
-            cfLiveTitle.setText(pfx + "延迟");
-            setLiveHead(true, false);
-            cfLiveStat.setText((total > 0 ? "已测 " + done + " / " + total + "   ·   " : "")
-                    + "通 " + lat.size() + "   ·   不通 " + Math.max(0, done - lat.size()));
-            for (int i = 0; i < liveRows.size(); i++) {
-                LiveRow r = liveRows.get(i);
-                if (i < lat.size()) {
-                    CfOptimizer.Candidate c = lat.get(i);
-                    // 三重编码：数字 + 颜色 + 条长，别让用户只靠颜色判断好坏
-                    int color = c.rttMs <= 80 ? COLOR_OK
-                            : c.rttMs <= 180 ? COLOR_ACCENT : COLOR_HINT;
-                    r.rank.setText(pad2(i + 1));
-                    r.rank.setTextColor(i < 3 ? COLOR_ACCENT : COLOR_HINT);
-                    r.ip.setText(c.ip);
-                    r.ip.setTextColor(COLOR_TEXT);
-                    r.lat.setText(c.rttMs + " ms");
-                    r.lat.setTextColor(color);
-                    r.lat.setVisibility(View.VISIBLE);
-                    r.metric.setVisibility(View.INVISIBLE);
-                    r.bar.setFillColor(color);
-                    r.bar.setProgress(Math.max(0.05f, 1f - Math.min(1f, c.rttMs / 400f)));
-                } else {
-                    blankLiveRow(r);
-                }
+        } else {
+            int n = liveRows.size();
+            seqFrom = Math.max(0, lat.size() - n);
+            view = lat.subList(seqFrom, lat.size());
+        }
+
+        for (int i = 0; i < liveRows.size(); i++) {
+            LiveRow r = liveRows.get(i);
+            if (i >= view.size()) { blankLiveRow(r); continue; }
+            CfOptimizer.Candidate c = view.get(i);
+            r.rank.setText(review ? pad2(i + 1) : pad3(seqFrom + i + 1));
+            r.rank.setTextColor(review && i < 3 ? COLOR_ACCENT : COLOR_HINT);
+            r.metric.setVisibility(View.INVISIBLE);
+            if (c.rttMs < 0) {
+                r.ip.setText(c.ip);
+                r.ip.setTextColor(COLOR_HINT);
+                r.lat.setText("超时");
+                r.lat.setTextColor(COLOR_HINT);
+                r.bar.setFillColor(COLOR_HINT);
+                r.bar.setProgress(0f);
+            } else {
+                // 三重编码：数字 + 颜色 + 条长，别让用户只靠颜色判断好坏
+                int color = c.rttMs <= 80 ? COLOR_OK
+                        : c.rttMs <= 180 ? COLOR_ACCENT : COLOR_HINT;
+                r.ip.setText(c.ip);
+                r.ip.setTextColor(COLOR_TEXT);
+                r.lat.setText(c.rttMs + " ms");
+                r.lat.setTextColor(color);
+                r.bar.setFillColor(color);
+                r.bar.setProgress(Math.max(0.05f, 1f - Math.min(1f, c.rttMs / 400f)));
             }
-            cfLiveFoot.setText(last.isEmpty()
-                    ? (cfFinished ? "这次没有测到通的 IP" : "正在并发测试 443 端口，结果会逐条落在这张表里")
-                    : (cfFinished ? "最后一条    " : "刚刚    ") + last);
-        } else if (sp != null) {
-            Collections.sort(sp, new java.util.Comparator<CfOptimizer.Candidate>() {
+            r.lat.setVisibility(View.VISIBLE);
+        }
+
+        cfLiveFoot.setText(last.isEmpty()
+                ? (review ? "这次没有测到通的 IP" : "正在并发扫描 443 端口，结果逐条落进这张表")
+                : (review ? "最后一条    " : "刚刚    ") + last);
+    }
+
+    /** 测速段：同样流水，先"测速中…"再原地变数值；回看才按速度排序 */
+    private void renderSpeedStage(boolean review, List<CfOptimizer.Candidate> sp,
+                                  List<CfOptimizer.Candidate> lat, int done, int total,
+                                  String last, String banner, long bannerAt) {
+        java.util.Map<String, Integer> rttOf = new java.util.HashMap<String, Integer>();
+        if (lat != null) {
+            for (int i = 0; i < lat.size(); i++) {
+                CfOptimizer.Candidate c = lat.get(i);
+                if (c.rttMs >= 0) rttOf.put(c.ip, c.rttMs);
+            }
+        }
+        double fastest = 0;
+        int measured = 0;
+        for (int i = 0; i < sp.size(); i++) {
+            CfOptimizer.Candidate c = sp.get(i);
+            if (c.mbps > fastest) fastest = c.mbps;
+            if (c.mbps != -2) measured++;
+        }
+        cfLiveTitle.setText(review ? "测试回顾 · 下载测速" : "实时测试 · 下载测速");
+        setLiveHead(true, true);
+
+        List<CfOptimizer.Candidate> view;
+        int seqFrom = 0;
+        if (review) {
+            view = new ArrayList<CfOptimizer.Candidate>(sp);
+            Collections.sort(view, new java.util.Comparator<CfOptimizer.Candidate>() {
                 @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
                     return Double.compare(sortKey(b.mbps), sortKey(a.mbps));
                 }
                 /** 实测值按大小排；"测速中"(-2) 排在有结果之后，失败(-1) 垫底 */
                 private double sortKey(double v) { return v == -2 ? -0.5 : v; }
             });
-            double fastest = 0;
-            for (CfOptimizer.Candidate c : sp) if (c.mbps > fastest) fastest = c.mbps;
-            cfLiveTitle.setText(pfx + "下载速度");
-            setLiveHead(true, true);
-            // IP → 延迟：lat 是延迟阶段的快照，用来给每一行补上"这条到底快不快"
-            java.util.Map<String, Integer> rttOf = new java.util.HashMap<String, Integer>();
-            if (lat != null) {
-                for (int i = 0; i < lat.size(); i++) rttOf.put(lat.get(i).ip, lat.get(i).rttMs);
-            }
-            cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
-                    + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
-            for (int i = 0; i < liveRows.size(); i++) {
-                LiveRow r = liveRows.get(i);
-                if (i < sp.size()) {
-                    CfOptimizer.Candidate c = sp.get(i);
-                    r.rank.setText(pad2(i + 1));
-                    r.rank.setTextColor(i < 3 ? COLOR_ACCENT : COLOR_HINT);
-                    r.ip.setText(c.ip);
-                    r.ip.setTextColor(COLOR_TEXT);
-                    if (c.mbps == -2) {
-                        r.metric.setText("测速中…");
-                        r.metric.setTextColor(COLOR_HINT);
-                        r.bar.setFillColor(COLOR_HINT);
-                        r.bar.setProgress(0f);
-                    } else if (c.mbps > 0) {
-                        r.metric.setText(String.format("%.1f Mbps", c.mbps));
-                        r.metric.setTextColor(COLOR_OK);
-                        r.bar.setFillColor(COLOR_OK);
-                        r.bar.setProgress(Math.min(1f, (float) (c.mbps / 40f)));
-                    } else {
-                        r.metric.setText("失败");
-                        r.metric.setTextColor(COLOR_HINT);
-                        r.bar.setFillColor(COLOR_HINT);
-                        r.bar.setProgress(0f);
-                    }
-                    // 同一行再挂延迟：绿 ≤80ms、蓝 ≤180ms、灰更差（和延迟阶段同一套分级）
-                    Integer rtt = rttOf.get(c.ip);
-                    r.lat.setText(rtt == null ? "—" : rtt + " ms");
-                    r.lat.setTextColor(rtt == null ? COLOR_HINT
-                            : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT);
-                    r.lat.setVisibility(View.VISIBLE);
-                    r.metric.setVisibility(View.VISIBLE);
-                } else {
-                    blankLiveRow(r);
-                }
-            }
-            cfLiveFoot.setText(last.isEmpty()
-                    ? (cfFinished ? "这次没有测速结果" : "并发测速中，结果逐条落在这张表里")
-                    : "并发测速    ·    " + (cfFinished ? "最后一条 " : "刚刚 ") + last);
+            cfLiveStat.setText("测速 " + measured + (total > 0 ? " / " + total : "") + " 个"
+                    + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : "")
+                    + (rttOf.isEmpty() ? "" : "   ·   延迟段通 " + rttOf.size()));
         } else {
-            cfLiveTitle.setText(pfx + "采样");
-            cfLiveStat.setText("");
-            setLiveHead(false, false);
-            for (LiveRow r : liveRows) blankLiveRow(r);
-            cfLiveFoot.setText(cfFinished
-                    ? "这次在采样阶段就结束了，没有可展示的测试记录"
-                    : "从 Cloudflare 官方网段按大小加权随机取点…");
+            int n = liveRows.size();
+            seqFrom = Math.max(0, sp.size() - n);
+            view = sp.subList(seqFrom, sp.size());
+            cfLiveStat.setText("测速 " + measured + (total > 0 ? " / " + total : "")
+                    + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
         }
+
+        for (int i = 0; i < liveRows.size(); i++) {
+            LiveRow r = liveRows.get(i);
+            if (i >= view.size()) { blankLiveRow(r); continue; }
+            CfOptimizer.Candidate c = view.get(i);
+            r.rank.setText(review ? pad2(i + 1) : pad3(seqFrom + i + 1));
+            r.rank.setTextColor(review && i < 3 ? COLOR_ACCENT : COLOR_HINT);
+            r.ip.setText(c.ip);
+            r.ip.setTextColor(c.mbps == -2 ? COLOR_HINT : COLOR_TEXT);
+            if (c.mbps == -2) {
+                r.metric.setText("测速中…");
+                r.metric.setTextColor(COLOR_HINT);
+                r.bar.setFillColor(COLOR_HINT);
+                r.bar.setProgress(0f);
+            } else if (c.mbps > 0) {
+                r.metric.setText(String.format("%.1f Mbps", c.mbps));
+                r.metric.setTextColor(COLOR_OK);
+                r.bar.setFillColor(COLOR_OK);
+                r.bar.setProgress(Math.min(1f, (float) (c.mbps / 40f)));
+            } else {
+                r.metric.setText("失败");
+                r.metric.setTextColor(COLOR_HINT);
+                r.bar.setFillColor(COLOR_HINT);
+                r.bar.setProgress(0f);
+            }
+            // 同一行再挂延迟：绿 ≤80ms、蓝 ≤180ms、灰更差（和延迟段同一套分级）
+            Integer rtt = rttOf.get(c.ip);
+            r.lat.setText(rtt == null ? "—" : rtt + " ms");
+            r.lat.setTextColor(rtt == null ? COLOR_HINT
+                    : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT);
+            r.lat.setVisibility(View.VISIBLE);
+            r.metric.setVisibility(View.VISIBLE);
+        }
+
+        // 段首小结：延迟段刚结束的两三秒里，先把「通了几个 / 谁进测速」讲清楚
+        boolean fresh = banner != null && !banner.isEmpty()
+                && System.currentTimeMillis() - bannerAt < 3000;
+        cfLiveFoot.setText(fresh ? banner
+                : last.isEmpty()
+                    ? (review ? "这次没有测速结果" : "并发测速中，结果逐条落进这张表")
+                    : (review ? "按速度从高到低    ·    最后一条 " : "并发测速    ·   刚刚 ") + last);
+    }
+
+    /** 采样段：还没有可以展示的单条结果 */
+    private void renderSampleStage(boolean review) {
+        cfLiveTitle.setText(review ? "测试回顾 · 采样" : "实时测试 · 采样");
+        cfLiveStat.setText("");
+        setLiveHead(false, false);
+        for (LiveRow r : liveRows) blankLiveRow(r);
+        cfLiveFoot.setText(review
+                ? "这次在采样阶段就结束了，没有可展示的测试记录"
+                : "从 Cloudflare 官方网段按大小加权随机取点…");
     }
 
     /** 列头随阶段显隐：延迟阶段只有「延迟」，测速阶段「延迟 + 速度」 */
