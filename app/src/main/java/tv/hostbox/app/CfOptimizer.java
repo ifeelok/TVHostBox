@@ -191,7 +191,9 @@ public final class CfOptimizer {
                 speedOk > 0 ? ("测速成功 " + speedOk + "/" + speedPool.size())
                         : "测速全部失败（网络可能无法访问 " + SPEED_HOST + "）");
 
-        // ---------- 4. 排序取前 N ----------
+        // ---------- 4. 排序 ----------
+        // topN > 0：保留前 N 名（老行为，给调用方留余地）
+        // topN <= 0：不限条数——测速成功的全部留下，界面按速度排好直接当结果用
         List<Candidate> result = new ArrayList<Candidate>();
         // 速度有效的排前面，按速度降序；速度同分按延迟升序
         List<Candidate> bySpeed = new ArrayList<Candidate>();
@@ -205,10 +207,16 @@ public final class CfOptimizer {
                 return cmp != 0 ? cmp : Integer.compare(a.rttMs, b.rttMs);
             }
         });
-        result.addAll(bySpeed.subList(0, Math.min(topN, bySpeed.size())));
-        for (Candidate c : noSpeed) {
-            if (result.size() >= topN) break;
-            result.add(c);
+        int limit = topN > 0 ? topN : Integer.MAX_VALUE;
+        result.addAll(bySpeed.subList(0, Math.min(limit, bySpeed.size())));
+        if (topN > 0) {
+            for (Candidate c : noSpeed) {
+                if (result.size() >= limit) break;
+                result.add(c);
+            }
+        } else if (result.isEmpty()) {
+            // 一个都没测出速度：把延迟可用的全给出去，总比空手强
+            result.addAll(noSpeed);
         }
         progress.onProgress("done", 1, 1, "优选完成");
         return result;

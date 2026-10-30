@@ -88,21 +88,20 @@ public class MainActivity extends Activity {
 
     // CF 面板
     private Button btnCfStart;
-    /** 跑完之后在「结果列表 / 测试过程」之间来回切 */
-    private Button btnCfPeek;
-    private boolean cfViewLive = false;   // 当前正看着测试过程表（回顾态）
-    private boolean cfHasRun = false;     // 至少跑过一次，才有过程可回看
-    private boolean cfFinished = false;   // 本次已结束（完成 / 取消 / 失败）
+    private boolean cfFinished = false;   // 本次已结束（完成 / 取消 / 失败）→ 过程表变成绩单
     private TextView tvCfProgress;
     private TextView tvCfPhase;
     private TextView tvCfPct;
     private Bar barCf;
-    private SideList cfList;
+    /** 本轮结果（跑完后成绩单就是它，不再另开一个结果页） */
     private List<CfOptimizer.Candidate> cfResults = new ArrayList<CfOptimizer.Candidate>();
+    private int cfSel = 0;                // 成绩单里光标停在第几条
+    private int cfWinFrom = 0;            // 成绩单窗口的第一条（结果多于可见行时滚动）
+    private boolean cfBoardFocused = false; // 过程表当前是否有焦点（选中行亮块跟随）
     private volatile boolean cfRunning = false;
     private volatile CfOptimizer cfOpt = null; // 当前优选任务（用于取消）
 
-    // ---- CF 实时测试面板：跑的时候用来「看见过程」，跑完再切回结果列表 ----
+    // ---- CF 过程表：跑的时候是扫描流水，跑完原地变成绩单（同一块区域、可选中写入） ----
     private LinearLayout cfLive;
     private TextView cfLiveTitle;
     private TextView cfLiveStat;
@@ -137,7 +136,6 @@ public class MainActivity extends Activity {
     };
 
     // 设置项 key（CF 参数）
-    private static final String PREF_CF_TOPN = "cfTopN";        // 保留前几名，默认 8
     private static final String PREF_CF_SAMPLE = "cfSample";    // 采样数量，默认 320
     private static final String PREF_CF_DOWNLOAD_MB = "cfDownloadMB"; // 测速大小 MB，默认 6
     private static final String PREF_AUTO_UPDATE = "autoUpdate"; // 启动时自动检查升级，默认开
@@ -363,13 +361,9 @@ public class MainActivity extends Activity {
         } else if (index == 1) {
             return btnQrRefresh != null && btnQrRefresh.requestFocus();
         } else {
-            // 回看中：回到过程表本身（它有框态焦点），↑ 一次是表、再一次才是页签
-            if (cfViewLive && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+            // 过程表就是成绩单：跑过就直接回到表上（表里 ↑↓ 选、OK 写入）
+            if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
                 return cfLive.requestFocus();
-            }
-            if (cfList != null && !cfResults.isEmpty()) {
-                cfList.focusBox();
-                return true;
             }
             return btnCfStart != null && btnCfStart.requestFocus();
         }
@@ -829,7 +823,6 @@ public class MainActivity extends Activity {
      */
     private void showSettingsDialog() {
         int keep = prefs.getInt(HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
-        int topN = prefs.getInt(PREF_CF_TOPN, 8);
         int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
         int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
 
@@ -859,14 +852,8 @@ public class MainActivity extends Activity {
         });
 
         settingsSection(box, "Cloudflare 优选", false);
-        settingRow(box, "结果保留条数", "前 " + topN + " 名", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                pickFromOptions("CF 优选结果保留前几名",
-                        new String[]{"前 5 名", "前 8 名", "前 10 名", "前 15 名"},
-                        new int[]{5, 8, 10, 15},
-                        PREF_CF_TOPN, 8);
-            }
-        });
+        // 「结果保留条数」已去掉：跑完的测速结果全部列出来（按速度排好），
+        // 少了一个"只能看前 N 名"的心智负担，也少一次设置项
         settingRow(box, "网段采样数量",
                 sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
                 new View.OnClickListener() {
@@ -1766,15 +1753,11 @@ public class MainActivity extends Activity {
         lpDet.topMargin = dp(8);
         progCard.addView(tvCfProgress, lpDet);
 
-        // 结果列表：跑完之后才出现（跑的时候用上面的实时面板占这块位置）
-        cfList = new CfSideList();
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        lp.topMargin = dp(12);
-        cfList.setLayoutParams(lp);
-
-        // 实时测试面板：和结果列表占同一块区域，同一时刻只显示一个
+        // 过程表：跑的时候是流水，跑完就是成绩单——同一块区域、同一套列，
+        // 不再有「结果列表 / 测试过程」两个长得差不多的页面互相切
         cfLive = buildCfLiveBoard();
+        cfLive.setVisibility(View.VISIBLE);
+        renderLiveBoard();          // 先立一张"未开始"的表，别让中间空着
 
         // 主 CTA 放底部按钮行（与 Hosts 页「添加条目」同构）：
         // 之前挤在标题行右侧，标题比按钮矮，按钮上沿被父容器裁掉——层级和高度都不可控
@@ -1782,26 +1765,17 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { startCfOptimize(); }
         });
         stylePrimary(btnCfStart);
-
-        // 第二枚按钮：跑完之后才出现。测试过程表跑完就消失，用户想回头看看哪个 IP 抖，
-        // 就再也找不回来了——这里给一个可反复切换的入口，两套视图随时能对调。
-        btnCfPeek = actionButton("查看测试过程", Icons.CLOCK, new View.OnClickListener() {
-            @Override public void onClick(View v) { toggleCfProcessView(); }
-        });
-        btnCfPeek.setVisibility(View.GONE);
         btnCfStart.setContentDescription("OK 开始优选 · ←→ 换一个按钮 · ↑ 回列表");
-        btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回列表");
 
         LinearLayout buttons = new LinearLayout(this);
-        addButtons(buttons, new Button[]{btnCfPeek, btnCfStart});
-        wireButtonRow(new Button[]{btnCfPeek, btnCfStart}, navCfBtn, new Runnable() {
+        addButtons(buttons, new Button[]{btnCfStart});
+        wireButtonRow(new Button[]{btnCfStart}, navCfBtn, new Runnable() {
             @Override public void run() { cfButtonRowUp(); }
         });
 
         root.addView(title);
         root.addView(progCard);
         root.addView(cfLive);
-        root.addView(cfList);
         root.addView(buttons);
         return root;
     }
@@ -1842,24 +1816,40 @@ public class MainActivity extends Activity {
         card.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
                 v.setBackground(hasFocus ? Skin.cardFocus(th) : Skin.card(th));
-                if (hasFocus) setHint("OK 返回结果列表 · ↑ 回页签 · ↓ 回按钮行");
+                cfBoardFocused = hasFocus;
+                renderLiveBoard();       // 选中行的亮块跟着焦点亮/暗
+                if (hasFocus) setHint(cfBoardHint());
             }
         });
         card.setOnKeyListener(new View.OnKeyListener() {
             @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                boolean grid = cfFinished && !cfResults.isEmpty();
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    // 成绩单：先在同一张表里往上走，走到第一条才交给页签
+                    if (grid && cfSel > 0) {
+                        cfSel--;
+                        keepSelVisible();
+                        renderLiveBoard();
+                        return true;
+                    }
                     return navCfBtn != null && navCfBtn.requestFocus();
                 }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    if (btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) {
-                        return btnCfPeek.requestFocus();
+                    if (grid && cfSel < cfResults.size() - 1) {
+                        cfSel++;
+                        keepSelVisible();
+                        renderLiveBoard();
+                        return true;
                     }
                     return btnCfStart != null && btnCfStart.requestFocus();
                 }
-                // OK = 和「返回结果列表」按钮同一个动作，少绕一步
                 if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-                    toggleCfProcessView();
+                    // 成绩单上 OK = 把这一条写进 hosts；跑的时候不响应
+                    if (grid && cfSel >= 0 && cfSel < cfResults.size()) {
+                        showApplyDialog(cfResults.get(cfSel));
+                        return true;
+                    }
                     return true;
                 }
                 return keyCode == KeyEvent.KEYCODE_DPAD_LEFT
@@ -2090,15 +2080,13 @@ public class MainActivity extends Activity {
         }
         cfRunning = true;
         cfFinished = false;
-        cfViewLive = false;
         setBtnText(btnCfStart, "取消优选");
-        // 跑的时候只留主按钮：过程自动展示，没有"回看"这回事
-        if (btnCfPeek != null) btnCfPeek.setVisibility(View.GONE);
         btnCfStart.setContentDescription("OK 取消优选（再按一次中止）· ←→ 换一个按钮");
         refreshBtnHint(btnCfStart);
         cfResults.clear();
-        // 跑的时候：藏结果列表、亮实时面板——同一块区域，不让用户看到两套东西
-        if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
+        cfSel = 0;
+        cfWinFrom = 0;
+        // 跑的时候过程表自动接管这块区域，表里逐条滚
         if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
         setLivePhase("sample");
         renderLiveBoard();
@@ -2107,10 +2095,10 @@ public class MainActivity extends Activity {
         if (barCf != null) barCf.setProgress(0f);
 
         // 设置里的 CF 参数
-        int topN = prefs.getInt(PREF_CF_TOPN, 8);
         int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
         int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
-        final CfOptimizer opt = new CfOptimizer(sample, Math.max(16, sample / 13), topN, mb * 1024 * 1024);
+        // topN 传 0 = 不限条数：测速成功的全部留下，界面按速度排好直接当结果
+        final CfOptimizer opt = new CfOptimizer(sample, Math.max(16, sample / 13), 0, mb * 1024 * 1024);
         cfOpt = opt;
         // 逐 IP 回调：把「每个 IP 测得怎么样」交给实时面板，而不是只留一行汇总
         opt.setIpListener(new CfOptimizer.IpListener() {
@@ -2186,26 +2174,19 @@ public class MainActivity extends Activity {
                         @Override public void run() {
                             cfResults.clear();
                             cfResults.addAll(result);
-                            showCfResults();
-                            cfFinished = true;
-                            cfHasRun = true;
-                            showPeekButton("查看测试过程", Icons.CLOCK);
-                            if (cfList != null) cfList.resetList();
+                            finishCfRun(result.size());
                             if (tvCfPhase != null) tvCfPhase.setText(result.isEmpty() ? "没有可用结果" : "优选完成");
                             if (tvCfPct != null) tvCfPct.setText(result.size() + " 个可用");
                             if (barCf != null) barCf.setProgress(1f);
-                            tvCfProgress.setText("选中某条按 OK，即可写进指定域名的 hosts。");
-                            // 结果出来后焦点直接进列表，少按一次方向键
-                            if (!result.isEmpty() && cfList != null) cfList.focusEntered();
+                            tvCfProgress.setText(result.isEmpty()
+                                    ? "这次没有测到可用的 IP，可以把采样数量调大，或换个时段再试。"
+                                    : "表里按速度从高到低；选中某条按 OK，即可写进指定域名的 hosts。");
                         }
                     });
                 } catch (final InterruptedException e) {
                     runOnUiThread(new Runnable() {
                         @Override                         public void run() {
-                            showCfResults();
-                            cfFinished = true;
-                            cfHasRun = true;
-                            showPeekButton("查看测试过程", Icons.CLOCK);
+                            finishCfRun(0);
                             if (tvCfPhase != null) tvCfPhase.setText("已取消");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("已取消优选，已完成的进度不会写入 hosts。");
@@ -2214,10 +2195,7 @@ public class MainActivity extends Activity {
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override                         public void run() {
-                            showCfResults();
-                            cfFinished = true;
-                            cfHasRun = true;
-                            showPeekButton("查看测试过程", Icons.CLOCK);
+                            finishCfRun(0);
                             if (tvCfPhase != null) tvCfPhase.setText("优选失败");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("失败原因：" + e);
@@ -2229,10 +2207,9 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             btnCfStart.setEnabled(true);
-                            setBtnText(btnCfStart, cfHasRun ? "重新优选" : "开始优选");
-                            btnCfStart.setContentDescription(cfHasRun
-                                    ? "OK 重新优选 · ←→ 换一个按钮 · ↑ 回列表"
-                                    : "OK 开始优选 · ←→ 换一个按钮 · ↑ 回列表");
+                            setBtnText(btnCfStart, "重新优选");
+                            btnCfStart.setContentDescription(
+                                    "OK 重新优选 · ←→ 换一个按钮 · ↑ 回列表");
                             refreshBtnHint(btnCfStart);
                         }
                     });
@@ -2274,71 +2251,47 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 跑完/取消/失败：把实时面板收起来，让结果列表接管这块区域 */
-    private void showCfResults() {
-        cfViewLive = false;
-        if (cfLive != null) cfLive.setVisibility(View.GONE);
-        if (cfList != null) cfList.setVisibility(View.VISIBLE);
-        if (btnCfPeek != null) setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
-    }
-
-    /** 亮出「查看测试过程」这枚按钮（跑完才有） */
-    private void showPeekButton(String text, String iconKind) {
-        if (btnCfPeek == null) return;
-        setBtnIcon(btnCfPeek, iconKind, text);
-        btnCfPeek.setVisibility(View.VISIBLE);
-    }
-
     /**
-     * 结果列表 ⇄ 测试过程表，随时对调。
+     * 跑完 / 取消 / 失败后的收尾：过程表原地变成绩单，不再切到另一个页面。
      *
-     * 两套视图占的是内容区同一块位置（上下布局完全一致，切换时页面不跳），
-     * 所以这里只是把谁可见翻一下，不重建任何控件——盒子上零开销。
+     * 以前这里会藏掉过程表、亮出结果列表，两块内容几乎一样却要用户自己切。
+     * 现在数据就在同一张表里：按速度排好、↑↓ 选、OK 写入。
      */
-    private void toggleCfProcessView() {
-        if (cfRunning || !cfHasRun) return;
-        cfViewLive = !cfViewLive;
-        if (cfViewLive) {
-            if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
-            if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
-            setBtnIcon(btnCfPeek, Icons.LIST, "返回结果列表");
-            btnCfPeek.setContentDescription("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 看过程表");
-            refreshBtnHint(btnCfPeek);
-            renderLiveBoard();   // 用最后一轮的过程数据重画（标题自动变成「测试回顾」）
-            // 进度卡底下那行字两种视图关心的东西不一样，要跟着一起换
-            if (tvCfProgress != null) tvCfProgress.setText(
-                    "这是刚才那次任务的完整过程（按速度从高到低），不是正在跑。");
-            setHint("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 看过程表");
-        } else {
-            if (cfLive != null) cfLive.setVisibility(View.GONE);
-            if (cfList != null) cfList.setVisibility(View.VISIBLE);
-            setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
-            btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回列表");
-            refreshBtnHint(btnCfPeek);
-            if (tvCfProgress != null) tvCfProgress.setText(cfResults.isEmpty()
-                    ? "这次没有可用的 IP，可以把采样数量调大，或换个时段再试。"
-                    : "选中某条按 OK，即可写进指定域名的 hosts。");
-            if (cfList != null && !cfResults.isEmpty()) cfList.focusEntered();
-            else {
-                if (btnCfPeek != null) btnCfPeek.requestFocus();
-                setHint("OK 重新优选 · ←→ 换一个按钮 · ↑ 回列表");
-            }
-        }
+    private void finishCfRun(int resultCount) {
+        cfFinished = true;
+        cfSel = 0;
+        cfWinFrom = 0;
+        if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
+        renderLiveBoard();
+        // 有结果就把焦点直接放到表上：少按一次方向键，也让人一眼看出"这里可以选"
+        if (cfLive != null && resultCount > 0) cfLive.requestFocus();
+        else if (btnCfStart != null) btnCfStart.requestFocus();
     }
 
-    /**
-     * CF 按钮行按「上」去哪：
-     *   回看中 → 过程表（表里 ↑ 才是页签）；有结果 → 结果列表；运行中/空态 → 页签。
-     * 以前一律跳页签，真机上被吐槽"按上应该回到 IP 框子里"。
-     */
-    private void cfButtonRowUp() {
-        if (cfViewLive && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
-            cfLive.requestFocus();
-            return;
+    /** 成绩单里光标上下移动时，保证它始终在可见窗口内 */
+    private void keepSelVisible() {
+        int n = liveRows.size();
+        if (n <= 0) return;
+        if (cfSel < cfWinFrom) cfWinFrom = cfSel;
+        else if (cfSel >= cfWinFrom + n) cfWinFrom = cfSel - n + 1;
+        int maxFrom = Math.max(0, cfResults.size() - n);
+        if (cfWinFrom > maxFrom) cfWinFrom = maxFrom;
+        if (cfWinFrom < 0) cfWinFrom = 0;
+    }
+
+    /** 过程表的提示条：跑的时候说"在跑"，跑完说"能选" */
+    private String cfBoardHint() {
+        if (cfRunning) return "正在测试 · ↑ 回页签 · ↓ 回按钮行";
+        if (cfFinished && !cfResults.isEmpty()) {
+            return "↑↓ 选一条 · OK 写入 hosts · ↓ 按钮行";
         }
-        if (!cfRunning && cfList != null && cfList.getVisibility() == View.VISIBLE
-                && !cfResults.isEmpty()) {
-            cfList.focusEntered();
+        return "↑ 回页签 · ↓ 回按钮行";
+    }
+
+    /** CF 按钮行按「上」去哪：跑完回成绩单（表里 ↑ 才是页签），否则回页签 */
+    private void cfButtonRowUp() {
+        if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+            cfLive.requestFocus();
             return;
         }
         if (navCfBtn != null) navCfBtn.requestFocus();
@@ -2403,9 +2356,111 @@ public class MainActivity extends Activity {
             });
         }
 
+        // 还没开始跑：表先立在那儿，说明下一步会发生什么（不然后台一片空白）
+        if (!review && livePhase.isEmpty()) {
+            renderIdleBoard();
+            return;
+        }
+        // 跑完有结果：同一张表原地变成绩单（可选中、按速度排好）
+        if (review && !cfResults.isEmpty()) {
+            renderResultGrid(lat);
+            return;
+        }
+        // 正常跑完却一条都没有（延迟全超时 / 测速全失败）：给一句人话，别摆空表
+        if (review && cfResults.isEmpty() && "speed".equals(phase)) {
+            renderEmptyResult();
+            return;
+        }
+
         if (sp != null) renderSpeedStage(review, sp, lat, done, total, last, banner, bannerAt);
         else if (lat != null) renderLatencyStage(review, lat, done, total, last);
         else renderSampleStage(review);
+    }
+
+    /** 未开始：表先立住，告诉用户按下去会看到什么 */
+    private void renderIdleBoard() {
+        cfLiveTitle.setText("优选过程");
+        cfLiveStat.setText("");
+        setLiveHead(true, true);
+        for (LiveRow r : liveRows) blankLiveRow(r);
+        cfLiveFoot.setText("点下方「开始优选」：先采样 CF 网段，再逐个测延迟、给最快的几条测下载速度");
+    }
+
+    /** 空态：跑完了，但一条可用 IP 都没有 */
+    private void renderEmptyResult() {
+        cfLiveTitle.setText("优选结果");
+        setLiveHead(false, false);
+        cfLiveStat.setText("0 条");
+        for (LiveRow r : liveRows) {
+            blankLiveRow(r);
+            r.root.setBackground(null);
+        }
+        cfLiveFoot.setText("这次没测到可用的 IP    ·    可以调大采样数量，或换个时段再试");
+    }
+
+    /**
+     * 成绩单：跑完后的唯一结果视图（不再是另一个页面）。
+     *
+     * 数据是 cfResults——测速成功的全部（按速度降序），没有条数上限。
+     * 光标停在 cfSel，窗口从 cfWinFrom 起画 liveRows.size() 行，超出就靠 ↑↓ 滚。
+     */
+    private void renderResultGrid(List<CfOptimizer.Candidate> lat) {
+        int n = liveRows.size();
+        if (cfSel >= cfResults.size()) cfSel = Math.max(0, cfResults.size() - 1);
+        keepSelVisible();
+
+        double fastest = 0;
+        int withSpeed = 0, bestRtt = Integer.MAX_VALUE;
+        for (int i = 0; i < cfResults.size(); i++) {
+            CfOptimizer.Candidate c = cfResults.get(i);
+            if (c.mbps > fastest) fastest = c.mbps;
+            if (c.mbps > 0) withSpeed++;
+            if (c.rttMs >= 0 && c.rttMs < bestRtt) bestRtt = c.rttMs;
+        }
+        cfLiveTitle.setText("优选结果");
+        setLiveHead(true, true);
+        cfLiveStat.setText("共 " + cfResults.size() + " 条"
+                + (withSpeed < cfResults.size() ? "（" + (cfResults.size() - withSpeed) + " 条仅延迟可用）" : "")
+                + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
+
+        for (int i = 0; i < n; i++) {
+            LiveRow r = liveRows.get(i);
+            int pos = cfWinFrom + i;
+            if (pos >= cfResults.size()) { blankLiveRow(r); continue; }
+            CfOptimizer.Candidate c = cfResults.get(pos);
+            boolean selected = pos == cfSel;
+            // 光标行整块提亮（和列表页同一套观感），未选中行只靠数字和颜色分档
+            r.root.setBackground(selected ? Skin.row(th, true, cfBoardFocused) : null);
+            r.rank.setText(pad2(pos + 1));
+            r.rank.setTextColor(selected && cfBoardFocused ? COLOR_ON_FOCUS : COLOR_ACCENT);
+            r.rank.setBackground(Skin.badge(th, selected && cfBoardFocused));
+            r.ip.setText(c.ip);
+            r.ip.setTextColor(c.mbps > 0 ? COLOR_TEXT : COLOR_HINT);
+            if (c.mbps > 0) {
+                r.metric.setText(String.format("%.1f Mbps", c.mbps));
+                r.metric.setTextColor(COLOR_OK);
+                r.bar.setFillColor(COLOR_OK);
+                r.bar.setProgress(Math.min(1f, (float) (c.mbps / 40f)));
+            } else {
+                r.metric.setText("未测速");
+                r.metric.setTextColor(COLOR_HINT);
+                r.bar.setFillColor(COLOR_HINT);
+                r.bar.setProgress(0f);
+            }
+            int rtt = c.rttMs;
+            r.lat.setText(rtt < 0 ? "—" : rtt + " ms");
+            r.lat.setTextColor(rtt < 0 ? COLOR_HINT
+                    : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT);
+            r.lat.setVisibility(View.VISIBLE);
+            r.metric.setVisibility(View.VISIBLE);
+        }
+
+        // 表尾说清"现在选中谁、按 OK 会发生什么"——回看/结果合一后，这是唯一的操作入口
+        CfOptimizer.Candidate sel = cfResults.get(cfSel);
+        cfLiveFoot.setText("选中 " + (cfSel + 1) + "/" + cfResults.size() + "    "
+                + sel.ip + "    ·    延迟 " + (sel.rttMs < 0 ? "—" : sel.rttMs + " ms")
+                + "    ·    " + (sel.mbps > 0 ? String.format("%.1f Mbps", sel.mbps) : "未测速")
+                + "    ·    OK 写入 hosts");
     }
 
     /** 延迟段：所有扫过的 IP 都进流水（不通的也留着，看得见扫描密度） */
@@ -2446,6 +2501,7 @@ public class MainActivity extends Activity {
 
         for (int i = 0; i < liveRows.size(); i++) {
             LiveRow r = liveRows.get(i);
+            r.root.setBackground(null);
             if (i >= view.size()) { blankLiveRow(r); continue; }
             CfOptimizer.Candidate c = view.get(i);
             r.rank.setText(review ? pad2(i + 1) : pad3(seqFrom + i + 1));
@@ -2522,6 +2578,7 @@ public class MainActivity extends Activity {
 
         for (int i = 0; i < liveRows.size(); i++) {
             LiveRow r = liveRows.get(i);
+            r.root.setBackground(null);
             if (i >= view.size()) { blankLiveRow(r); continue; }
             CfOptimizer.Candidate c = view.get(i);
             r.rank.setText(review ? pad2(i + 1) : pad3(seqFrom + i + 1));
@@ -2586,6 +2643,7 @@ public class MainActivity extends Activity {
     }
 
     private void blankLiveRow(LiveRow r) {
+        r.root.setBackground(null);   // 清掉成绩单/选中行的底色残留
         r.rank.setText("–");
         r.rank.setTextColor(COLOR_HINT);
         r.ip.setText("");
@@ -3276,36 +3334,6 @@ public class MainActivity extends Activity {
         }
         @Override void onLeaveUp() { if (navHostsBtn != null) navHostsBtn.requestFocus(); }
         @Override void onLeaveDown() { focusButtonRow(hostsButtonRow, lastHostsBtnIdx); }
-    }
-
-    private class CfSideList extends SideList {
-        CfSideList() {
-            super(20, 15, "还没有优选结果\n\n按下方「开始优选」，等延迟和速度都跑完");
-        }
-        @Override int count() { return cfResults.size(); }
-        @Override int idleColorFor(int position) {
-            return cfResults.get(position).mbps > 0 ? COLOR_TEXT : COLOR_HINT;
-        }
-        @Override void bindRow(RowHolder h, int position) {
-            CfOptimizer.Candidate c = cfResults.get(position);
-            boolean speedOk = c.mbps > 0;
-            h.main.setText(c.ip);
-            String speed = speedOk ? String.format("%.1f Mbps", c.mbps) : "未测速";
-            h.sub.setText("延迟 " + c.rttMs + " ms   ·   " + speed
-                    + (speedOk ? "" : "（仅延迟可用，可先试用）"));
-        }
-        @Override void onActivate(int position) {
-            if (position >= 0 && position < cfResults.size()) showApplyDialog(cfResults.get(position));
-        }
-        /** ↑ 和 ↓ 都落到按钮行左枚：两枚按钮并排，落在固定一枚比"看方向猜"稳 */
-        @Override void onLeaveUp() { onLeaveDown(); }
-        /** ↓ 落到「查看测试过程」而不是「重新优选」：后者会清空现有结果，当默认落点太危险 */
-        @Override void onLeaveDown() {
-            if (btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) btnCfPeek.requestFocus();
-            else if (btnCfStart != null) btnCfStart.requestFocus();
-        }
-        @Override String leaveUpLabel() { return "回到按钮行"; }
-        @Override String emptyHint() { return "还没有优选结果 · ↑ 回到按钮行"; }
     }
 
     // ==================== Adapter ====================
