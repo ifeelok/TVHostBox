@@ -3,12 +3,14 @@ package tv.hostbox.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -86,6 +88,11 @@ public class MainActivity extends Activity {
 
     // CF 面板
     private Button btnCfStart;
+    /** 跑完之后在「结果列表 / 测试过程」之间来回切 */
+    private Button btnCfPeek;
+    private boolean cfViewLive = false;   // 当前正看着测试过程表（回顾态）
+    private boolean cfHasRun = false;     // 至少跑过一次，才有过程可回看
+    private boolean cfFinished = false;   // 本次已结束（完成 / 取消 / 失败）
     private TextView tvCfProgress;
     private TextView tvCfPhase;
     private TextView tvCfPct;
@@ -345,7 +352,10 @@ public class MainActivity extends Activity {
         } else if (index == 1) {
             return btnQrRefresh != null && btnQrRefresh.requestFocus();
         } else {
-            // CF 页有结果时进列表，没结果时焦点该在「开始优选」上
+            // 正在回看过程表时，焦点给「返回结果列表」；否则有结果进列表、没结果给「开始优选」
+            if (cfViewLive && btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) {
+                return btnCfPeek.requestFocus();
+            }
             if (cfList != null && !cfResults.isEmpty()) {
                 cfList.focusBox();
                 return true;
@@ -528,6 +538,8 @@ public class MainActivity extends Activity {
                     if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) next = idx - 1;
                     else if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) next = idx + 1;
                     if (next < 0 || next >= row.length) return false;
+                    // 隐藏的按钮（比如跑任务时收起的「查看测试过程」）不能吃焦点
+                    if (row[next].getVisibility() != View.VISIBLE) return false;
                     return row[next].requestFocus();
                 }
             });
@@ -582,6 +594,9 @@ public class MainActivity extends Activity {
         });
         // 一行里只留一个"主按钮"：加条目是这一页最高频的操作，用强调色把它抬出来
         stylePrimary(btnAdd);
+        // 主按钮的提示条读 contentDescription：以前没设，光标停在「添加条目」上会显示
+        // "OK 开始测速…"（从 CF 页抄过来的默认文案），现在改成这一页该说的话
+        btnAdd.setContentDescription("OK 添加条目 · ←→ 换一个按钮 · ↑ 回列表");
         btnHostsAdd = btnAdd;
         btnHostsRefresh = actionButton("刷新", Icons.REFRESH, new View.OnClickListener() {
             @Override public void onClick(View v) { loadHostsAsync(); }
@@ -946,8 +961,8 @@ public class MainActivity extends Activity {
                             // 启动时的后台检查失败则不打扰（国内网络访问 GitHub 本来就不稳）
                             if (!silent) {
                                 showInfoDialog("检查更新失败",
-                                        "连不上 GitHub：\n" + fErr
-                                                + "\n\n盒子需要能访问 github.com；也可以在浏览器里打开"
+                                        "直连和 3 个国内镜像都没连上：\n" + fErr
+                                                + "\n\n可以在浏览器里打开发布页手动下载："
                                                 + "\nhttps://github.com/ifeelok/TVHostBox/releases");
                             }
                             return;
@@ -974,6 +989,33 @@ public class MainActivity extends Activity {
 
     private void showInfoDialog(String title, String msg) {
         newDialog().setTitle(title).setMessage(msg).setPositiveButton("知道了", null).show();
+    }
+
+    /**
+     * 更新走不下去时的收尾。
+     *
+     * 电视上没有地址栏也没有复制粘贴，弹一段带 URL 的文字等于让用户干瞪眼；
+     * 这里给一枚「打开发布页」，能唤起系统浏览器/下载器就直接开，不能就退回提示。
+     */
+    private void showUpdateFailDialog(String title, String msg, final String url) {
+        if (updateDlg != null && updateDlg.isShowing()) updateDlg.dismiss();
+        newDialog()
+                .setTitle(title)
+                .setMessage(msg)
+                .setPositiveButton("打开发布页", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) { openUrl(url); }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    private void openUrl(String url) {
+        if (url == null || url.trim().isEmpty()) { toast("没有可打开的地址"); return; }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            toast("盒子里没有浏览器，可以用手机或电脑打开这个地址");
+        }
     }
 
     /** 有新版本时顶栏右侧出现一枚小胶囊；传 null 表示"检查失败"，用警告色 */
@@ -1003,6 +1045,8 @@ public class MainActivity extends Activity {
         }
         String notes = releaseNotes(info.body);
         if (notes.length() > 0) sb.append("\n\n").append(notes);
+        if (info.noNotes) sb.append("\n（镜像只同步到版本号，发布说明请看发布页）");
+        if (info.source.length() > 0) sb.append("\n更新源：").append(info.source);
         sb.append("\n\n更新会覆盖安装，hosts 与设置都保留。");
 
         newDialog()
@@ -1069,15 +1113,41 @@ public class MainActivity extends Activity {
             @Override public void run() {
                 final File apk = new File(getCacheDir(), "update.apk");
                 try {
-                    UpdateChecker.download(info.apkUrl, apk, new UpdateChecker.DownloadProgress() {
+                    // 自动安装全靠 root（pm install）；没有 root 下载下来也装不上，
+                    // 早点说清楚并给出发布页，比让用户等到 100% 再报错强
+                    if (!RootShell.isRootAvailable()) {
+                        ui.post(new Runnable() {
+                            @Override public void run() {
+                                showUpdateFailDialog("需要 root 才能自动安装",
+                                        "这台盒子还没拿到 root，应用内自动更新用不了。\n\n"
+                                                + "可以用手机或电脑打开发布页下载 APK，再用 U 盘拷进盒子安装；"
+                                                + "hosts 与设置都会保留。",
+                                        info.htmlUrl);
+                            }
+                        });
+                        return;
+                    }
+                    UpdateChecker.download(info.apkUrl, apk, info.size,
+                            new UpdateChecker.DownloadProgress() {
                         @Override public void onProgress(final long done, final long total) {
                             ui.post(new Runnable() {
                                 @Override public void run() {
-                                    if (total > 0) bar.setProgress(done / (float) total);
-                                    tvState.setText(total > 0
-                                            ? "正在下载 " + (done * 100 / total) + "%   （"
-                                                    + mbText(done) + " / " + mbText(total) + "）"
+                                    long known = total > 0 ? total : info.size;
+                                    if (known > 0) bar.setProgress(done / (float) known);
+                                    tvState.setText(known > 0
+                                            ? "正在下载 " + (done * 100 / known) + "%   （"
+                                                    + mbText(done) + " / " + mbText(known) + "）"
                                             : "正在下载 " + mbText(done));
+                                }
+                            });
+                        }
+                    }, new UpdateChecker.SourceListener() {
+                        @Override public void onSource(final String desc) {
+                            ui.post(new Runnable() {
+                                @Override public void run() {
+                                    // 直连不通时会把这条改成「正在通过镜像 xx 下载」，别让用户以为卡死
+                                    tvState.setText("正在通过 " + desc + " 下载…");
+                                    bar.setProgress(0f);
                                 }
                             });
                         }
@@ -1113,10 +1183,11 @@ public class MainActivity extends Activity {
                                 tvNote.setText("若没有自动打开，请手动启动「电视Host管家」。");
                             } else {
                                 showUpdatePill(info.tag);
-                                tvState.setText("自动安装失败");
-                                tvNote.setText("可以到发布页手动下载安装：\n" + info.htmlUrl + "\n\n"
-                                        + (r.output.length() > 200
-                                                ? r.output.substring(0, 200) + "…" : r.output));
+                                showUpdateFailDialog("自动安装失败",
+                                        "安装包已经下载好，但系统拒绝了安装。\n\n"
+                                                + (r.output.length() > 220
+                                                        ? r.output.substring(0, 220) + "…" : r.output),
+                                        info.htmlUrl);
                             }
                         }
                     });
@@ -1124,9 +1195,10 @@ public class MainActivity extends Activity {
                     ui.post(new Runnable() {
                         @Override public void run() {
                             try { apk.delete(); } catch (Exception ignored) {}
-                            tvState.setText("更新失败");
-                            tvNote.setText("原因：" + e + "\n\n也可以到发布页手动下载：\n"
-                                    + info.htmlUrl);
+                            showUpdateFailDialog("更新失败",
+                                    "下载或安装没走通：\n" + e
+                                            + "\n\n可以稍后重试，或到发布页手动下载。",
+                                    info.htmlUrl);
                         }
                     });
                 }
@@ -1571,9 +1643,19 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { startCfOptimize(); }
         });
         stylePrimary(btnCfStart);
+
+        // 第二枚按钮：跑完之后才出现。测试过程表跑完就消失，用户想回头看看哪个 IP 抖，
+        // 就再也找不回来了——这里给一个可反复切换的入口，两套视图随时能对调。
+        btnCfPeek = actionButton("查看测试过程", Icons.CLOCK, new View.OnClickListener() {
+            @Override public void onClick(View v) { toggleCfProcessView(); }
+        });
+        btnCfPeek.setVisibility(View.GONE);
+        btnCfStart.setContentDescription("OK 开始优选 · ←→ 换一个按钮 · ↑ 回页签");
+        btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回页签");
+
         LinearLayout buttons = new LinearLayout(this);
-        addButtons(buttons, new Button[]{btnCfStart});
-        wireButtonRow(new Button[]{btnCfStart}, navCfBtn);
+        addButtons(buttons, new Button[]{btnCfPeek, btnCfStart});
+        wireButtonRow(new Button[]{btnCfPeek, btnCfStart}, navCfBtn);
 
         root.addView(title);
         root.addView(progCard);
@@ -1744,7 +1826,12 @@ public class MainActivity extends Activity {
             return;
         }
         cfRunning = true;
+        cfFinished = false;
+        cfViewLive = false;
         setBtnText(btnCfStart, "取消优选");
+        // 跑的时候只留主按钮：过程自动展示，没有"回看"这回事
+        if (btnCfPeek != null) btnCfPeek.setVisibility(View.GONE);
+        btnCfStart.setContentDescription("OK 取消优选（再按一次中止）· ←→ 换一个按钮");
         cfResults.clear();
         // 跑的时候：藏结果列表、亮实时面板——同一块区域，不让用户看到两套东西
         if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
@@ -1832,6 +1919,9 @@ public class MainActivity extends Activity {
                             cfResults.clear();
                             cfResults.addAll(result);
                             showCfResults();
+                            cfFinished = true;
+                            cfHasRun = true;
+                            showPeekButton("查看测试过程", Icons.CLOCK);
                             if (cfList != null) cfList.resetList();
                             if (tvCfPhase != null) tvCfPhase.setText(result.isEmpty() ? "没有可用结果" : "优选完成");
                             if (tvCfPct != null) tvCfPct.setText(result.size() + " 个可用");
@@ -1843,8 +1933,11 @@ public class MainActivity extends Activity {
                     });
                 } catch (final InterruptedException e) {
                     runOnUiThread(new Runnable() {
-                        @Override public void run() {
+                        @Override                         public void run() {
                             showCfResults();
+                            cfFinished = true;
+                            cfHasRun = true;
+                            showPeekButton("查看测试过程", Icons.CLOCK);
                             if (tvCfPhase != null) tvCfPhase.setText("已取消");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("已取消优选，已完成的进度不会写入 hosts。");
@@ -1852,8 +1945,11 @@ public class MainActivity extends Activity {
                     });
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
-                        @Override public void run() {
+                        @Override                         public void run() {
                             showCfResults();
+                            cfFinished = true;
+                            cfHasRun = true;
+                            showPeekButton("查看测试过程", Icons.CLOCK);
                             if (tvCfPhase != null) tvCfPhase.setText("优选失败");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("失败原因：" + e);
@@ -1865,7 +1961,10 @@ public class MainActivity extends Activity {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
                             btnCfStart.setEnabled(true);
-                            setBtnText(btnCfStart, "开始优选");
+                            setBtnText(btnCfStart, cfHasRun ? "重新优选" : "开始优选");
+                            btnCfStart.setContentDescription(cfHasRun
+                                    ? "OK 重新优选 · ←→ 换一个按钮 · ↑ 回页签"
+                                    : "OK 开始优选 · ←→ 换一个按钮 · ↑ 回页签");
                         }
                     });
                 }
@@ -1891,8 +1990,49 @@ public class MainActivity extends Activity {
 
     /** 跑完/取消/失败：把实时面板收起来，让结果列表接管这块区域 */
     private void showCfResults() {
+        cfViewLive = false;
         if (cfLive != null) cfLive.setVisibility(View.GONE);
         if (cfList != null) cfList.setVisibility(View.VISIBLE);
+        if (btnCfPeek != null) setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
+    }
+
+    /** 亮出「查看测试过程」这枚按钮（跑完才有） */
+    private void showPeekButton(String text, String iconKind) {
+        if (btnCfPeek == null) return;
+        setBtnIcon(btnCfPeek, iconKind, text);
+        btnCfPeek.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * 结果列表 ⇄ 测试过程表，随时对调。
+     *
+     * 两套视图占的是内容区同一块位置（上下布局完全一致，切换时页面不跳），
+     * 所以这里只是把谁可见翻一下，不重建任何控件——盒子上零开销。
+     */
+    private void toggleCfProcessView() {
+        if (cfRunning || !cfHasRun) return;
+        cfViewLive = !cfViewLive;
+        if (cfViewLive) {
+            if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
+            if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
+            setBtnIcon(btnCfPeek, Icons.LIST, "返回结果列表");
+            btnCfPeek.setContentDescription("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 回页签");
+            renderLiveBoard();   // 用最后一轮的过程数据重画（标题自动变成「测试回顾」）
+            // 进度卡底下那行字两种视图关心的东西不一样，要跟着一起换
+            if (tvCfProgress != null) tvCfProgress.setText(
+                    "这是刚才那次任务的完整过程（按速度从高到低），不是正在跑。");
+            setHint("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 回页签");
+        } else {
+            if (cfLive != null) cfLive.setVisibility(View.GONE);
+            if (cfList != null) cfList.setVisibility(View.VISIBLE);
+            setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
+            btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回页签");
+            if (tvCfProgress != null) tvCfProgress.setText(cfResults.isEmpty()
+                    ? "这次没有可用的 IP，可以把采样数量调大，或换个时段再试。"
+                    : "选中某条按 OK，即可写进指定域名的 hosts。");
+            if (cfList != null && !cfResults.isEmpty()) cfList.focusEntered();
+            else setHint("OK 重新优选 · ←→ 换一个按钮 · ↑ 回页签");
+        }
     }
 
     /** 过程回调密度很高（320 个 IP），限流到约 9 fps，避免盒子卡在重绘上 */
@@ -1908,6 +2048,8 @@ public class MainActivity extends Activity {
 
     private void renderLiveBoard() {
         if (cfLive == null || cfLive.getVisibility() != View.VISIBLE) return;
+        // 跑完后再打开这张表就是「回看」，标题换成回顾口吻，别让人以为还在跑
+        final String pfx = cfFinished ? "测试回顾 · " : "实时测试 · ";
         String phase;
         int done, total;
         String last;
@@ -1927,7 +2069,7 @@ public class MainActivity extends Activity {
                     return Integer.compare(a.rttMs, b.rttMs);
                 }
             });
-            cfLiveTitle.setText("实时测试 · 延迟");
+            cfLiveTitle.setText(pfx + "延迟");
             cfLiveStat.setText((total > 0 ? "已测 " + done + " / " + total + "   ·   " : "")
                     + "通 " + lat.size() + "   ·   不通 " + Math.max(0, done - lat.size()));
             for (int i = 0; i < liveRows.size(); i++) {
@@ -1950,8 +2092,8 @@ public class MainActivity extends Activity {
                 }
             }
             cfLiveFoot.setText(last.isEmpty()
-                    ? "正在并发测试 443 端口，结果会逐条落在这张表里"
-                    : "刚刚    " + last);
+                    ? (cfFinished ? "这次没有测到通的 IP" : "正在并发测试 443 端口，结果会逐条落在这张表里")
+                    : (cfFinished ? "最后一条    " : "刚刚    ") + last);
         } else if (sp != null) {
             Collections.sort(sp, new java.util.Comparator<CfOptimizer.Candidate>() {
                 @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
@@ -1962,7 +2104,7 @@ public class MainActivity extends Activity {
             });
             double fastest = 0;
             for (CfOptimizer.Candidate c : sp) if (c.mbps > fastest) fastest = c.mbps;
-            cfLiveTitle.setText("实时测试 · 下载速度");
+            cfLiveTitle.setText(pfx + "下载速度");
             cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
                     + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
             for (int i = 0; i < liveRows.size(); i++) {
@@ -1993,13 +2135,16 @@ public class MainActivity extends Activity {
                     blankLiveRow(r);
                 }
             }
-            cfLiveFoot.setText(last.isEmpty() ? "同时测 8 个 IP，结果逐条落在这张表里"
-                    : "同时测 8 个    ·    刚刚 " + last);
+            cfLiveFoot.setText(last.isEmpty()
+                    ? (cfFinished ? "这次没有测速结果" : "同时测 8 个 IP，结果逐条落在这张表里")
+                    : "同时测 8 个    ·    " + (cfFinished ? "最后一条 " : "刚刚 ") + last);
         } else {
-            cfLiveTitle.setText("实时测试 · 采样");
+            cfLiveTitle.setText(pfx + "采样");
             cfLiveStat.setText("");
             for (LiveRow r : liveRows) blankLiveRow(r);
-            cfLiveFoot.setText("从 Cloudflare 官方网段按大小加权随机取点…");
+            cfLiveFoot.setText(cfFinished
+                    ? "这次在采样阶段就结束了，没有可展示的测试记录"
+                    : "从 Cloudflare 官方网段按大小加权随机取点…");
         }
     }
 
@@ -2157,6 +2302,15 @@ public class MainActivity extends Activity {
                 ? (android.graphics.drawable.Drawable) tag : null, text));
     }
 
+    /** 连图标一起换（「查看测试过程」和「返回结果列表」是两种动作，图标要跟着变） */
+    private void setBtnIcon(Button b, String iconKind, String text) {
+        if (b == null || iconKind == null) return;
+        android.graphics.drawable.Drawable icon = Icons.drawable(this, iconKind, 18,
+                b.hasFocus() ? COLOR_ON_FOCUS : COLOR_HINT);
+        b.setTag(icon);
+        b.setText(iconText(icon, text));
+    }
+
     /** 带图标的按钮：图标用 Icons 现画，光标上来时和文字一起翻色 */
     private Button actionButton(String text, String iconKind, View.OnClickListener listener) {
         Button b = new Button(this);
@@ -2178,7 +2332,13 @@ public class MainActivity extends Activity {
                 Button bb = (Button) v;
                 bb.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_TEXT);
                 tintIcons(bb, hasFocus ? COLOR_ON_FOCUS : COLOR_HINT);
-                if (hasFocus) setHint("OK 执行 · ←→ 换一个按钮 · ↑ 回列表");
+                // 按钮的说明文字可能随状态变（开始/取消/重新、查看/返回），
+                // 所以提示条优先读 contentDescription，没设才用通用文案
+                if (hasFocus) {
+                    CharSequence cd = v.getContentDescription();
+                    setHint(cd != null && cd.length() > 0
+                            ? cd.toString() : "OK 执行 · ←→ 换一个按钮 · ↑ 回列表");
+                }
             }
         });
         // 去掉 Button 默认的左右内缩和最小宽度，否则等宽排布时文字会被裁
@@ -2215,7 +2375,12 @@ public class MainActivity extends Activity {
                 Button bb = (Button) v;
                 bb.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_ON_ACCENT);
                 tintIcons(bb, hasFocus ? COLOR_ON_FOCUS : COLOR_ON_ACCENT);
-                if (hasFocus) setHint("OK 开始测速（再次按下可取消）");
+                // 主按钮会换语义（开始 / 取消 / 重新），提示条跟着 contentDescription 走
+                if (hasFocus) {
+                    CharSequence cd = v.getContentDescription();
+                    setHint(cd != null && cd.length() > 0
+                            ? cd.toString() : "OK 开始测速（再次按下可取消）");
+                }
             }
         });
     }
@@ -2580,10 +2745,15 @@ public class MainActivity extends Activity {
         @Override void onActivate(int position) {
             if (position >= 0 && position < cfResults.size()) showApplyDialog(cfResults.get(position));
         }
-        @Override void onLeaveUp() { if (btnCfStart != null) btnCfStart.requestFocus(); }
-        @Override void onLeaveDown() { if (btnCfStart != null) btnCfStart.requestFocus(); }
-        @Override String leaveUpLabel() { return "回到开始按钮"; }
-        @Override String emptyHint() { return "还没有优选结果 · ↑ 回到开始按钮"; }
+        /** ↑ 和 ↓ 都落到按钮行左枚：两枚按钮并排，落在固定一枚比"看方向猜"稳 */
+        @Override void onLeaveUp() { onLeaveDown(); }
+        /** ↓ 落到「查看测试过程」而不是「重新优选」：后者会清空现有结果，当默认落点太危险 */
+        @Override void onLeaveDown() {
+            if (btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) btnCfPeek.requestFocus();
+            else if (btnCfStart != null) btnCfStart.requestFocus();
+        }
+        @Override String leaveUpLabel() { return "回到按钮行"; }
+        @Override String emptyHint() { return "还没有优选结果 · ↑ 回到按钮行"; }
     }
 
     // ==================== Adapter ====================
