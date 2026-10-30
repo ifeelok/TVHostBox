@@ -2153,8 +2153,12 @@ public class MainActivity extends Activity {
                         @Override public void onProgress(final String phase, final int done, final int total, final String detail) {
                             // 工作线程：先记过程数据（界面按 110ms 限流重绘），再更新顶部进度
                             synchronized (liveLock) {
-                                liveTotal = total;
-                                if (!"done".equals(phase)) setLivePhase(phase);
+                                // "done" 的 total 恒为 1，不能拿它覆盖真实总数，
+                                // 否则回看统计会变成「已测 24 / 1」这种怪数字
+                                if (!"done".equals(phase)) {
+                                    liveTotal = total;
+                                    setLivePhase(phase);
+                                }
                             }
                             scheduleLiveRender();
                             runOnUiThread(new Runnable() {
@@ -2239,8 +2243,16 @@ public class MainActivity extends Activity {
         synchronized (liveLock) {
             if (phase.equals(livePhase)) return;
             livePhase = phase;
-            if ("latency".equals(phase) || "speed".equals(phase) || "sample".equals(phase)) {
+            if ("latency".equals(phase) || "sample".equals(phase)) {
                 liveLat.clear();
+                liveSpeed.clear();
+                liveDone = 0;
+                liveLast = "";
+            } else if ("speed".equals(phase)) {
+                // 进测速阶段只清测速侧，liveLat 必须留着：
+                // ① 测速表每行的「延迟」列要靠它回填；② 跑完回看时整场过程不能缺延迟段。
+                // 以前在这里把它清了，而渲染分支又按「lat 非空」优先走延迟表——
+                // 结果测速阶段和回看全是空行 +「通 0」，底部 foot 却还是测速记录。
                 liveSpeed.clear();
                 liveDone = 0;
                 liveLast = "";
@@ -2361,7 +2373,9 @@ public class MainActivity extends Activity {
             });
         }
 
-        if (lat != null) {
+        // 测速阶段 lat 和 sp 都有快照（lat 仅供延迟列回填），必须按阶段分流：
+        // 以前按「lat 非空」优先，测速阶段和回看永远落进延迟分支，表上一片空白。
+        if (lat != null && !"speed".equals(phase)) {
             Collections.sort(lat, new java.util.Comparator<CfOptimizer.Candidate>() {
                 @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
                     return Integer.compare(a.rttMs, b.rttMs);
