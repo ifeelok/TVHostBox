@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
     private TextView cfLiveStat;
     private TextView cfLiveFoot;
     private final List<LiveRow> liveRows = new ArrayList<LiveRow>();
+    private float uiScaleCache = -1f;                  // uiScale() 的缓存（每次 onCreate 归零）
     private android.widget.ScrollView liveScroll;      // 过程表的滚动容器（行数多于可见高度时用）
     private String lastPhaseRendered = "";             // 阶段切换时把表滚回顶部
     /** 延迟阶段：已通的那些 IP（按延迟升序展示） */
@@ -147,6 +148,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AppContextHolder.init(this);
+        uiScaleCache = -1f;
         prefs = getSharedPreferences("hostbox", Context.MODE_PRIVATE);
 
         th = Theme.get(prefs.getInt(PREF_THEME, 0));
@@ -166,6 +168,7 @@ public class MainActivity extends Activity {
         getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(th.bg));
 
         setContentView(R.layout.activity_main);
+        applyLayoutScale();
         navHostsBtn = findViewById(R.id.nav_hosts);
         navQrBtn = findViewById(R.id.nav_qr);
         navCfBtn = findViewById(R.id.nav_cf);
@@ -181,7 +184,7 @@ public class MainActivity extends Activity {
         ((TextView) findViewById(R.id.brand_sub)).setTextColor(th.hint);
         tvRootStatus.setTextColor(th.hint);
         findViewById(R.id.root_pill).setBackground(Skin.pill(th, th.hint));
-        imgRootIcon.setImageDrawable(Icons.drawable(this, Icons.DOT, 14, th.hint));
+        imgRootIcon.setImageDrawable(Icons.drawable(this, Icons.DOT, iconDp(14), th.hint));
 
         findViewById(R.id.hair_line).setBackground(Skin.hairline(th));
 
@@ -193,8 +196,8 @@ public class MainActivity extends Activity {
         // 底部按键提示：键帽 + 说明，遥控器不用猜现在能按什么
         hintRow = findViewById(R.id.hint_row);
         setHint("←→ 切换页签 · ↓ 进入内容 · OK 选中");
-        chevOn = Icons.drawable(this, Icons.CHEVRON, 18, Theme.alpha(th.onFocus, 0.9f));
-        chevOff = Icons.drawable(this, Icons.CHEVRON, 18, th.hint);
+        chevOn = Icons.drawable(this, Icons.CHEVRON, iconDp(18), Theme.alpha(th.onFocus, 0.9f));
+        chevOff = Icons.drawable(this, Icons.CHEVRON, iconDp(18), th.hint);
 
         // 页签文字色要随「是否有光标」翻转，统一在这里挂钩
         View.OnFocusChangeListener navFocus = new View.OnFocusChangeListener() {
@@ -412,7 +415,7 @@ public class MainActivity extends Activity {
     private View newKeyCap(String key, boolean first) {
         TextView tv = new TextView(this);
         tv.setText(key);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
         tv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         tv.setTextColor(th.text);
         tv.setLetterSpacing(0.04f);
@@ -429,7 +432,7 @@ public class MainActivity extends Activity {
     private View newHintLabel(String label, boolean last) {
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(14));
         tv.setTextColor(th.hint);
         tv.setSingleLine(true);
         tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -501,7 +504,7 @@ public class MainActivity extends Activity {
         if (!(v instanceof TextView)) return;
         TextView tv = (TextView) v;
         tv.setAllCaps(false);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
         tv.setTypeface(null, active ? android.graphics.Typeface.BOLD
                 : android.graphics.Typeface.NORMAL);
         // Button 自带 88dp 最小宽/高，会把紧凑页签重新撑大，必须清掉
@@ -677,7 +680,7 @@ public class MainActivity extends Activity {
         tvRootStatus.setText(ok ? "root 可用" : "未获取 root");
         tvRootStatus.setTextColor(c);
         findViewById(R.id.root_pill).setBackground(Skin.pill(th, c));
-        imgRootIcon.setImageDrawable(Icons.drawable(this, ok ? Icons.CHECK : Icons.ALERT, 14, c));
+        imgRootIcon.setImageDrawable(Icons.drawable(this, ok ? Icons.CHECK : Icons.ALERT, iconDp(14), c));
     }
 
     /**
@@ -1536,7 +1539,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         TextView note = new TextView(this);
-        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
         note.setTextColor(COLOR_HINT);
         note.setLineSpacing(dp(3), 1f);
         note.setText("每次写入都会先备份原 hosts，误删可在「备份」里一键恢复。");
@@ -1596,7 +1599,7 @@ public class MainActivity extends Activity {
         TextView num = new TextView(this);
         num.setText(no);
         num.setGravity(Gravity.CENTER);
-        num.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        num.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
         num.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         num.setTextColor(COLOR_ACCENT);
         num.setBackground(Skin.stepDot(th));
@@ -1612,13 +1615,13 @@ public class MainActivity extends Activity {
         TextView tvMain = new TextView(this);
         tvMain.setText(main);
         tvMain.setTextColor(COLOR_TEXT);
-        tvMain.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        tvMain.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
         tvMain.setPadding(0, dp(3), 0, 0);
 
         TextView tvSub = new TextView(this);
         tvSub.setText(sub);
         tvSub.setTextColor(COLOR_HINT);
-        tvSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tvSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
         tvSub.setLineSpacing(dp(2), 1f);
 
         col.addView(tvMain);
@@ -1725,13 +1728,13 @@ public class MainActivity extends Activity {
         tvCfPhase = new TextView(this);
         tvCfPhase.setText("尚未开始");
         tvCfPhase.setTextColor(COLOR_TEXT);
-        tvCfPhase.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        tvCfPhase.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
         tvCfPhase.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
 
         tvCfPct = new TextView(this);
         tvCfPct.setText("—");
         tvCfPct.setTextColor(COLOR_HINT);
-        tvCfPct.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tvCfPct.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
         tvCfPct.setTypeface(android.graphics.Typeface.MONOSPACE);
         tvCfPct.setGravity(Gravity.END);
 
@@ -1863,13 +1866,13 @@ public class MainActivity extends Activity {
         cfLiveTitle = new TextView(this);
         cfLiveTitle.setText("实时测试");
         cfLiveTitle.setTextColor(COLOR_TEXT);
-        cfLiveTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        cfLiveTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
         cfLiveTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
 
         cfLiveStat = new TextView(this);
         cfLiveStat.setText("");
         cfLiveStat.setTextColor(COLOR_HINT);
-        cfLiveStat.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        cfLiveStat.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
         cfLiveStat.setTypeface(android.graphics.Typeface.MONOSPACE);
         cfLiveStat.setGravity(Gravity.END);
 
@@ -1912,7 +1915,7 @@ public class MainActivity extends Activity {
 
             r.rank = new TextView(this);
             r.rank.setGravity(Gravity.CENTER);
-            r.rank.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            r.rank.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
             r.rank.setTypeface(android.graphics.Typeface.MONOSPACE);
             r.rank.setTextColor(COLOR_HINT);
             r.rank.setBackground(Skin.badge(th, false));
@@ -1920,7 +1923,7 @@ public class MainActivity extends Activity {
 
             r.ip = new TextView(this);
             r.ip.setTextColor(COLOR_TEXT);
-            r.ip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            r.ip.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
             r.ip.setTypeface(android.graphics.Typeface.MONOSPACE);
             r.ip.setSingleLine(true);
             r.ip.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1936,7 +1939,7 @@ public class MainActivity extends Activity {
 
             r.metric = new TextView(this);
             r.metric.setTextColor(COLOR_HINT);
-            r.metric.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            r.metric.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
             r.metric.setTypeface(android.graphics.Typeface.MONOSPACE);
             r.metric.setGravity(Gravity.END);
             r.metric.setSingleLine(true);
@@ -1950,7 +1953,7 @@ public class MainActivity extends Activity {
 
         cfLiveFoot = new TextView(this);
         cfLiveFoot.setTextColor(COLOR_HINT);
-        cfLiveFoot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        cfLiveFoot.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
         cfLiveFoot.setSingleLine(true);
         cfLiveFoot.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams lpFoot = new LinearLayout.LayoutParams(
@@ -2445,7 +2448,7 @@ public class MainActivity extends Activity {
             Button chip = new Button(this);
             chip.setText(d);
             chip.setAllCaps(false);
-            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(14));
             chip.setTextColor(COLOR_TEXT);
             chip.setBackground(Skin.button(th));
             chip.setStateListAnimator(null);
@@ -2539,13 +2542,13 @@ public class MainActivity extends Activity {
     private Button actionButton(String text, String iconKind, View.OnClickListener listener) {
         Button b = new Button(this);
         b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
         b.setTextColor(COLOR_TEXT);
         b.setBackground(Skin.button(th));
         b.setStateListAnimator(null);
         if (iconKind != null) {
             android.graphics.drawable.Drawable icon =
-                    Icons.drawable(this, iconKind, 18, COLOR_HINT);
+                    Icons.drawable(this, iconKind, iconDp(18), COLOR_HINT);
             b.setTag(icon);
             b.setText(iconText(icon, text));
         } else {
@@ -2592,7 +2595,7 @@ public class MainActivity extends Activity {
         b.setBackground(Skin.primary(th));
         b.setTextColor(COLOR_ON_ACCENT);
         b.setTypeface(null, android.graphics.Typeface.BOLD);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(17));
         tintIcons(b, COLOR_ON_ACCENT);
         b.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
@@ -2637,24 +2640,93 @@ public class MainActivity extends Activity {
                 main.length() + 1, sb.length(), android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         tv.setText(sb);
         tv.setTextColor(COLOR_TEXT);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(26));
         tv.setLineSpacing(dp(6), 1f);
         tv.setPadding(0, 0, 0, dp(2));
     }
 
-    private void styleText(TextView tv, int color, int sp) {
+    private void styleText(TextView tv, int color, int sizeSp) {
         tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(sizeSp));
         tv.setPadding(0, dp(2), 0, dp(2));
+    }
+
+    /**
+     * XML 里写死的 dp/sp 也统一过一遍比例尺。
+     *
+     * XML 没法读 uiScale()，所以在 setContentView 之后按 id 覆盖一次——
+     * 否则会出现"代码里的控件缩了、XML 里的顶栏和页签没缩"的比例错乱。
+     * 覆盖的只是尺寸，颜色和样式仍在各自的主题逻辑里设置。
+     */
+    private void applyLayoutScale() {
+        findViewById(R.id.root).setPadding(dp(44), dp(16), dp(44), dp(6));
+
+        TextView logo = (TextView) findViewById(R.id.brand_logo);
+        LinearLayout.LayoutParams lpLogo =
+                (LinearLayout.LayoutParams) logo.getLayoutParams();
+        lpLogo.width = dp(40);
+        lpLogo.height = dp(40);
+        logo.setLayoutParams(lpLogo);
+        logo.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(20));
+
+        ((TextView) findViewById(R.id.brand_title))
+                .setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(20));
+        ((TextView) findViewById(R.id.brand_sub))
+                .setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
+
+        LinearLayout pill = (LinearLayout) findViewById(R.id.root_pill);
+        pill.setPadding(dp(12), dp(7), dp(14), dp(7));
+        View rootIcon = findViewById(R.id.root_icon);
+        LinearLayout.LayoutParams lpIcon =
+                (LinearLayout.LayoutParams) rootIcon.getLayoutParams();
+        lpIcon.width = dp(14);
+        lpIcon.height = dp(14);
+        lpIcon.setMarginEnd(dp(7));
+        rootIcon.setLayoutParams(lpIcon);
+        ((TextView) findViewById(R.id.root_text))
+                .setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
+
+        View pillUp = findViewById(R.id.update_pill);
+        LinearLayout.LayoutParams lpUp = (LinearLayout.LayoutParams) pillUp.getLayoutParams();
+        lpUp.setMarginStart(dp(10));
+        pillUp.setLayoutParams(lpUp);
+        ((TextView) pillUp).setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
+        ((TextView) pillUp).setPadding(dp(12), dp(7), dp(12), dp(7));
+
+        LinearLayout.LayoutParams lpHair = (LinearLayout.LayoutParams)
+                findViewById(R.id.hair_line).getLayoutParams();
+        lpHair.topMargin = dp(10);
+        findViewById(R.id.hair_line).setLayoutParams(lpHair);
+
+        LinearLayout nav = (LinearLayout) findViewById(R.id.nav_bar);
+        nav.setPadding(nav.getPaddingLeft(), dp(10), nav.getPaddingRight(), dp(6));
+        int[] navIds = new int[]{R.id.nav_hosts, R.id.nav_qr, R.id.nav_cf};
+        for (int i = 0; i < navIds.length; i++) {
+            Button b = (Button) findViewById(navIds[i]);
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) b.getLayoutParams();
+            lp.height = dp(40);
+            lp.setMarginEnd(dp(10));
+            b.setLayoutParams(lp);
+            b.setPadding(dp(20), 0, dp(20), 0);
+            b.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
+        }
+
+        LinearLayout hintBar = (LinearLayout) findViewById(R.id.hint_bar);
+        hintBar.setPadding(hintBar.getPaddingLeft(), dp(8), hintBar.getPaddingRight(), dp(6));
     }
 
     private void toast(String msg) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
     }
 
+    /**
+     * dp：所有尺寸的唯一出口，已经乘过 uiScale()。
+     * 这样全工程的 44dp 安全边距、50dp 行高、62dp 设置行…在任何屏上都按同一比例缩放，
+     * 不需要每处再手动换算；1dp 的细线缩放后仍四舍五入回 1px，不受影响。
+     */
     private int dp(int v) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
-                v, getResources().getDisplayMetrics());
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
+                v * uiScale(), getResources().getDisplayMetrics()));
     }
 
     /**
@@ -2663,14 +2735,28 @@ public class MainActivity extends Activity {
      * 不用为每种设备写一套尺寸。后续适配移动端时直接复用这套比例即可。
      */
     private float uiScale() {
-        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-        float hdp = dm.heightPixels / dm.density;
-        return Math.max(0.62f, Math.min(1.2f, hdp / 720f));
+        // dp() 调用极密集（每个控件都要算），这里缓存；配置变化会重建 Activity 自然失效
+        if (uiScaleCache < 0) {
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            float hdp = dm.heightPixels / dm.density;
+            uiScaleCache = Math.max(0.62f, Math.min(1.2f, hdp / 720f));
+        }
+        return uiScaleCache;
     }
 
-    /** 按自适应比例取尺寸：弹窗、设置行这类"整块 UI"用它，避免在不同屏上写死 dp */
+    /** 按自适应比例取尺寸（dp 已经自带比例尺，这里只做 float 入口） */
     private int us(float v) {
-        return dp(Math.round(v * uiScale()));
+        return dp(Math.round(v));
+    }
+
+    /** 字号同样跟屏走：以 720dp 屏高为基准，小屏自动收、大屏自动放 */
+    private float sp(float v) {
+        return v * uiScale();
+    }
+
+    /** 图标按 dp 出图，同样吃比例尺 */
+    private int iconDp(float v) {
+        return Math.max(1, Math.round(v * uiScale()));
     }
 
     private String getBoxIp() {
@@ -3025,7 +3111,7 @@ public class MainActivity extends Activity {
         // 行首序号：长列表里"第几条"比纯文字更好定位
         h.num = new TextView(this);
         h.num.setGravity(Gravity.CENTER);
-        h.num.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        h.num.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
         h.num.setTextColor(COLOR_HINT);
         h.num.setBackground(Skin.badge(th, false));
         h.num.setTypeface(android.graphics.Typeface.MONOSPACE);
@@ -3054,7 +3140,7 @@ public class MainActivity extends Activity {
 
         // 行尾箭头：只在"光标真正停在这一行"时出现，暗示"按 OK 还有下一步"
         h.chev = new ImageView(this);
-        h.chev.setImageDrawable(Icons.drawable(this, Icons.CHEVRON, 18, COLOR_HINT));
+        h.chev.setImageDrawable(Icons.drawable(this, Icons.CHEVRON, iconDp(18), COLOR_HINT));
         h.chev.setVisibility(View.INVISIBLE);
         LinearLayout.LayoutParams lpChev = new LinearLayout.LayoutParams(dp(18), dp(18));
         lpChev.setMargins(0, 0, dp(12), 0);
