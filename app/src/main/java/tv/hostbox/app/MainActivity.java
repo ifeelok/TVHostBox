@@ -110,6 +110,9 @@ public class MainActivity extends Activity {
     private final List<LiveRow> liveRows = new ArrayList<LiveRow>();
     private float uiScaleCache = -1f;                  // uiScale() 的缓存（每次 onCreate 归零）
     private android.widget.ScrollView liveScroll;      // 过程表的滚动容器（行数多于可见高度时用）
+    private LinearLayout liveRowsBox;                  // 表体容器：行数按可用高度动态增减
+    private int liveRowCount = 0;
+    private TextView liveHeadLat, liveHeadSpeed;       // 列头「延迟 / 速度」，随阶段显隐
     private String lastPhaseRendered = "";             // 阶段切换时把表滚回顶部
     /** 延迟阶段：已通的那些 IP（按延迟升序展示） */
     private final List<CfOptimizer.Candidate> liveLat = new ArrayList<CfOptimizer.Candidate>();
@@ -1805,7 +1808,8 @@ public class MainActivity extends Activity {
         LinearLayout root;
         TextView rank;
         TextView ip;
-        TextView metric;
+        TextView metric;    // 速度（Mbps）/ 测速中 / 失败
+        TextView lat;       // 延迟（ms）：延迟阶段是主指标，测速阶段作为第二列一直挂着
         Bar bar;
     }
 
@@ -1890,9 +1894,43 @@ public class MainActivity extends Activity {
         lpLine.bottomMargin = dp(2);
         card.addView(line, lpLine);
 
-        // 行数跟随「CF 优选保留条数」设置：回顾表和结果列表一一对应，不再固定 6 行。
-        // 套一层 ScrollView，设置调成 10/15 名时也能全部看到。
-        int rows = Math.max(4, Math.min(15, prefs.getInt(PREF_CF_TOPN, 8)));
+        // 列头：延迟 / 速度两列的名字，对齐下面的数字列。
+        // 以前只有数字没有表头，「62 ms」和「38.4 Mbps」挤在一列里，看不出测的是哪一项。
+        LinearLayout hdr = new LinearLayout(this);
+        hdr.setOrientation(LinearLayout.HORIZONTAL);
+        hdr.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams lpHdr = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpHdr.topMargin = dp(4);
+        hdr.setLayoutParams(lpHdr);
+
+        hdr.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        View barGap = new View(this);
+        LinearLayout.LayoutParams lpBarGap = new LinearLayout.LayoutParams(dp(88), dp(1));
+        lpBarGap.setMargins(0, 0, dp(12), 0);
+        hdr.addView(barGap, lpBarGap);
+
+        liveHeadLat = new TextView(this);
+        liveHeadLat.setText("延迟");
+        liveHeadLat.setTextColor(COLOR_HINT);
+        liveHeadLat.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
+        liveHeadLat.setGravity(Gravity.END);
+        LinearLayout.LayoutParams lpHl = new LinearLayout.LayoutParams(dp(88),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpHl.setMargins(0, 0, dp(6), 0);
+        hdr.addView(liveHeadLat, lpHl);
+
+        liveHeadSpeed = new TextView(this);
+        liveHeadSpeed.setText("速度");
+        liveHeadSpeed.setTextColor(COLOR_HINT);
+        liveHeadSpeed.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
+        liveHeadSpeed.setGravity(Gravity.END);
+        hdr.addView(liveHeadSpeed, new LinearLayout.LayoutParams(dp(104),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(hdr);
+
+        // 行数不写死、也不跟「保留条数」走：由这块区域的实际高度决定能放几行（ensureLiveRows）。
+        // 固定 5/6 行时 320 个 IP 只有几条能露面，看着像"只测了这么几个"。
         android.widget.ScrollView sv = new android.widget.ScrollView(this);
         sv.setVerticalScrollBarEnabled(false);
         sv.setLayoutParams(new LinearLayout.LayoutParams(
@@ -1903,53 +1941,16 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         card.addView(sv);
         liveScroll = sv;
-
-        liveRows.clear();
-        for (int i = 0; i < rows; i++) {
-            LiveRow r = new LiveRow();
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setLayoutParams(new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(30)));
-
-            r.rank = new TextView(this);
-            r.rank.setGravity(Gravity.CENTER);
-            r.rank.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
-            r.rank.setTypeface(android.graphics.Typeface.MONOSPACE);
-            r.rank.setTextColor(COLOR_HINT);
-            r.rank.setBackground(Skin.badge(th, false));
-            row.addView(r.rank, new LinearLayout.LayoutParams(dp(24), dp(24)));
-
-            r.ip = new TextView(this);
-            r.ip.setTextColor(COLOR_TEXT);
-            r.ip.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
-            r.ip.setTypeface(android.graphics.Typeface.MONOSPACE);
-            r.ip.setSingleLine(true);
-            r.ip.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams lpIp = new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lpIp.setMargins(dp(12), 0, dp(10), 0);
-            row.addView(r.ip, lpIp);
-
-            r.bar = new Bar(this, Theme.alpha(th.text, th.light ? 0.12f : 0.14f), COLOR_ACCENT);
-            LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(dp(88), dp(6));
-            lpBar.setMargins(0, 0, dp(12), 0);
-            row.addView(r.bar, lpBar);
-
-            r.metric = new TextView(this);
-            r.metric.setTextColor(COLOR_HINT);
-            r.metric.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
-            r.metric.setTypeface(android.graphics.Typeface.MONOSPACE);
-            r.metric.setGravity(Gravity.END);
-            r.metric.setSingleLine(true);
-            row.addView(r.metric, new LinearLayout.LayoutParams(dp(104),
-                    ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            r.root = row;
-            rowsBox.addView(row);
-            liveRows.add(r);
-        }
+        liveRowsBox = rowsBox;
+        liveRowCount = 0;
+        ensureLiveRows();          // 高度已知就立刻排；未知等布局回调
+        sv.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View v, int l, int t, int r, int b,
+                                                 int ol, int ot, int or, int ob) {
+                // 区域高度变了（换主题重建、窗口尺寸变化）就重排行数，不动数据
+                if ((b - t) != (ob - ot) && ensureLiveRows()) renderLiveBoard();
+            }
+        });
 
         cfLiveFoot = new TextView(this);
         cfLiveFoot.setTextColor(COLOR_HINT);
@@ -1961,6 +1962,82 @@ public class MainActivity extends Activity {
         lpFoot.topMargin = dp(8);
         card.addView(cfLiveFoot, lpFoot);
         return card;
+    }
+
+    /**
+     * 按当前可用高度决定表里放几行：高度 / 行高，夹在 3~20 行之间。
+     * 这样 720p、1080p、4K、手机上都刚好填满这块区域，不会固定 5 行留一大片空白，
+     * 也不会在矮屏上把行挤成一条缝。返回 true 表示行数变了，需要重绘数据。
+     */
+    private boolean ensureLiveRows() {
+        if (liveScroll == null || liveRowsBox == null) return false;
+        int h = liveScroll.getHeight();
+        if (h <= 0) return false;
+        int fit = Math.max(3, Math.min(20, h / Math.max(1, dp(30))));
+        if (fit == liveRowCount && !liveRows.isEmpty()) return false;
+        liveRowsBox.removeAllViews();
+        liveRows.clear();
+        for (int i = 0; i < fit; i++) addLiveRow();
+        liveRowCount = fit;
+        return true;
+    }
+
+    /** 建一行：序号 / IP / 质量条 / 延迟 / 速度（列宽与列头对齐） */
+    private void addLiveRow() {
+        LiveRow r = new LiveRow();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(30)));
+
+        r.rank = new TextView(this);
+        r.rank.setGravity(Gravity.CENTER);
+        r.rank.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
+        r.rank.setTypeface(android.graphics.Typeface.MONOSPACE);
+        r.rank.setTextColor(COLOR_HINT);
+        r.rank.setBackground(Skin.badge(th, false));
+        row.addView(r.rank, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+        r.ip = new TextView(this);
+        r.ip.setTextColor(COLOR_TEXT);
+        r.ip.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(16));
+        r.ip.setTypeface(android.graphics.Typeface.MONOSPACE);
+        r.ip.setSingleLine(true);
+        r.ip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lpIp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        lpIp.setMargins(dp(12), 0, dp(10), 0);
+        row.addView(r.ip, lpIp);
+
+        r.bar = new Bar(this, Theme.alpha(th.text, th.light ? 0.12f : 0.14f), COLOR_ACCENT);
+        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(dp(88), dp(6));
+        lpBar.setMargins(0, 0, dp(12), 0);
+        row.addView(r.bar, lpBar);
+
+        r.lat = new TextView(this);
+        r.lat.setTextColor(COLOR_HINT);
+        r.lat.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
+        r.lat.setTypeface(android.graphics.Typeface.MONOSPACE);
+        r.lat.setGravity(Gravity.END);
+        r.lat.setSingleLine(true);
+        LinearLayout.LayoutParams lpLat = new LinearLayout.LayoutParams(dp(88),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpLat.setMargins(0, 0, dp(6), 0);
+        row.addView(r.lat, lpLat);
+
+        r.metric = new TextView(this);
+        r.metric.setTextColor(COLOR_HINT);
+        r.metric.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
+        r.metric.setTypeface(android.graphics.Typeface.MONOSPACE);
+        r.metric.setGravity(Gravity.END);
+        r.metric.setSingleLine(true);
+        row.addView(r.metric, new LinearLayout.LayoutParams(dp(104),
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        r.root = row;
+        liveRowsBox.addView(row);
+        liveRows.add(r);
     }
 
     /** 极简进度条：圆角轨道 + 强调色填充，比一行数字更直观 */
@@ -2257,6 +2334,7 @@ public class MainActivity extends Activity {
         final String renderPhase = cfFinished ? "review" : livePhase;
         // 跑完后再打开这张表就是「回看」，标题换成回顾口吻，别让人以为还在跑
         final String pfx = cfFinished ? "测试回顾 · " : "实时测试 · ";
+        ensureLiveRows();   // 首次布局完成后才知道能放几行
         String phase;
         int done, total;
         String last;
@@ -2267,7 +2345,12 @@ public class MainActivity extends Activity {
             total = liveTotal;
             last = liveLast;
             if ("latency".equals(phase)) lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
-            else if ("speed".equals(phase)) sp = new ArrayList<CfOptimizer.Candidate>(liveSpeed);
+            else if ("speed".equals(phase)) {
+                sp = new ArrayList<CfOptimizer.Candidate>(liveSpeed);
+                // 测速阶段也要把每个 IP 的延迟带出来：速度快的 IP 延迟可能很差，
+                // 只给 Mbps 没法判断这一条到底适不适合用
+                lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
+            }
         }
 
         // 换了阶段（或切入回顾）就把表滚回第一行，别让人接着看上一次滚到一半的位置
@@ -2285,6 +2368,7 @@ public class MainActivity extends Activity {
                 }
             });
             cfLiveTitle.setText(pfx + "延迟");
+            setLiveHead(true, false);
             cfLiveStat.setText((total > 0 ? "已测 " + done + " / " + total + "   ·   " : "")
                     + "通 " + lat.size() + "   ·   不通 " + Math.max(0, done - lat.size()));
             for (int i = 0; i < liveRows.size(); i++) {
@@ -2298,8 +2382,10 @@ public class MainActivity extends Activity {
                     r.rank.setTextColor(i < 3 ? COLOR_ACCENT : COLOR_HINT);
                     r.ip.setText(c.ip);
                     r.ip.setTextColor(COLOR_TEXT);
-                    r.metric.setText(c.rttMs + " ms");
-                    r.metric.setTextColor(color);
+                    r.lat.setText(c.rttMs + " ms");
+                    r.lat.setTextColor(color);
+                    r.lat.setVisibility(View.VISIBLE);
+                    r.metric.setVisibility(View.INVISIBLE);
                     r.bar.setFillColor(color);
                     r.bar.setProgress(Math.max(0.05f, 1f - Math.min(1f, c.rttMs / 400f)));
                 } else {
@@ -2320,6 +2406,12 @@ public class MainActivity extends Activity {
             double fastest = 0;
             for (CfOptimizer.Candidate c : sp) if (c.mbps > fastest) fastest = c.mbps;
             cfLiveTitle.setText(pfx + "下载速度");
+            setLiveHead(true, true);
+            // IP → 延迟：lat 是延迟阶段的快照，用来给每一行补上"这条到底快不快"
+            java.util.Map<String, Integer> rttOf = new java.util.HashMap<String, Integer>();
+            if (lat != null) {
+                for (int i = 0; i < lat.size(); i++) rttOf.put(lat.get(i).ip, lat.get(i).rttMs);
+            }
             cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
                     + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
             for (int i = 0; i < liveRows.size(); i++) {
@@ -2346,6 +2438,13 @@ public class MainActivity extends Activity {
                         r.bar.setFillColor(COLOR_HINT);
                         r.bar.setProgress(0f);
                     }
+                    // 同一行再挂延迟：绿 ≤80ms、蓝 ≤180ms、灰更差（和延迟阶段同一套分级）
+                    Integer rtt = rttOf.get(c.ip);
+                    r.lat.setText(rtt == null ? "—" : rtt + " ms");
+                    r.lat.setTextColor(rtt == null ? COLOR_HINT
+                            : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT);
+                    r.lat.setVisibility(View.VISIBLE);
+                    r.metric.setVisibility(View.VISIBLE);
                 } else {
                     blankLiveRow(r);
                 }
@@ -2356,6 +2455,7 @@ public class MainActivity extends Activity {
         } else {
             cfLiveTitle.setText(pfx + "采样");
             cfLiveStat.setText("");
+            setLiveHead(false, false);
             for (LiveRow r : liveRows) blankLiveRow(r);
             cfLiveFoot.setText(cfFinished
                     ? "这次在采样阶段就结束了，没有可展示的测试记录"
@@ -2363,11 +2463,27 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 列头随阶段显隐：延迟阶段只有「延迟」，测速阶段「延迟 + 速度」 */
+    private void setLiveHead(boolean latOn, boolean speedOn) {
+        if (liveHeadLat != null) {
+            liveHeadLat.setVisibility(latOn ? View.VISIBLE : View.INVISIBLE);
+            liveHeadLat.setText(latOn ? "延迟" : "");
+        }
+        if (liveHeadSpeed != null) {
+            liveHeadSpeed.setVisibility(speedOn ? View.VISIBLE : View.INVISIBLE);
+            liveHeadSpeed.setText(speedOn ? "速度" : "");
+        }
+    }
+
     private void blankLiveRow(LiveRow r) {
         r.rank.setText("–");
         r.rank.setTextColor(COLOR_HINT);
         r.ip.setText("");
+        r.lat.setText("");
+        r.lat.setTextColor(COLOR_HINT);
+        r.lat.setVisibility(View.VISIBLE);
         r.metric.setText("");
+        r.metric.setVisibility(View.VISIBLE);
         r.bar.setProgress(0f);
         r.bar.setFillColor(COLOR_HINT);
     }
