@@ -354,12 +354,12 @@ public class MainActivity extends Activity {
     private View newKeyCap(String key, boolean first) {
         TextView tv = new TextView(this);
         tv.setText(key);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         tv.setTextColor(th.text);
         tv.setLetterSpacing(0.04f);
         tv.setBackground(Skin.keycap(th));
-        tv.setPadding(dp(8), dp(2), dp(8), dp(2));
+        tv.setPadding(dp(9), dp(3), dp(9), dp(3));
         tv.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -371,7 +371,7 @@ public class MainActivity extends Activity {
     private View newHintLabel(String label, boolean last) {
         TextView tv = new TextView(this);
         tv.setText(label);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         tv.setTextColor(th.hint);
         tv.setSingleLine(true);
         tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -446,6 +446,11 @@ public class MainActivity extends Activity {
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         tv.setTypeface(null, active ? android.graphics.Typeface.BOLD
                 : android.graphics.Typeface.NORMAL);
+        // Button 自带 88dp 最小宽/高，会把紧凑页签重新撑大，必须清掉
+        tv.setMinWidth(0);
+        tv.setMinimumWidth(0);
+        tv.setMinHeight(0);
+        tv.setMinimumHeight(0);
         tv.setBackground(Skin.tab(th, active));
         if (tv.isFocused()) {
             tv.setTextColor(COLOR_ON_FOCUS);        // 光标在这儿：亮块 + 深色字
@@ -1234,9 +1239,10 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         progCard.addView(progHead);
 
-        barCf = new Bar(this, Theme.alpha(th.border, 0.9f), COLOR_ACCENT);
+        // 轨道用 text 色低透明度：border 色在卡片上几乎隐形，没开始测速时用户找不到"条"在哪
+        barCf = new Bar(this, Theme.alpha(th.text, th.light ? 0.14f : 0.16f), COLOR_ACCENT);
         LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(6));
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(7));
         lpBar.topMargin = dp(10);
         progCard.addView(barCf, lpBar);
 
@@ -1692,6 +1698,8 @@ public class MainActivity extends Activity {
             super(MainActivity.this);
             this.mainSp = mainSp;
             this.subSp = subSp;
+            // 上下留 5dp：选中行的高亮块不顶到卡片圆角和描边上
+            setPadding(0, dp(5), 0, dp(5));
             setFocusable(true);
             setFocusableInTouchMode(false);
             setPadding(dp(7), dp(7), dp(7), dp(7));
@@ -1923,8 +1931,9 @@ public class MainActivity extends Activity {
         @Override void bindRow(RowHolder h, int position) {
             HostsManager.Entry e = entries.get(position);
             h.main.setText(e.host);
-            String sub = e.ip + "   ·   第 " + (e.lineIndex + 1) + " 行";
-            if (e.comment != null && !e.comment.isEmpty()) sub += "   ·   " + e.comment;
+            // 副行紧凑排版：以前用三个空格隔开 "   ·   "，浪费横向空间还显得松散
+            String sub = e.ip + " · " + (e.lineIndex + 1) + " 行";
+            if (e.comment != null && !e.comment.isEmpty()) sub += " · " + e.comment;
             h.sub.setText(sub);
         }
         @Override void onActivate(int position) {
@@ -1976,13 +1985,13 @@ public class MainActivity extends Activity {
         RowHolder h = new RowHolder();
         h.row = new LinearLayout(this);
         h.row.setOrientation(LinearLayout.HORIZONTAL);
-        // 行高下限 60dp：10-foot 场景下 40dp 的行距会让上下两行"粘"在一起
-        h.row.setMinimumHeight(dp(56));
+        // 行高下限 50dp：既保证 3 米外两行文字不粘连，又让 720dp 高的屏能看到 6~7 行
+        h.row.setMinimumHeight(dp(50));
         h.row.setGravity(Gravity.CENTER_VERTICAL);
 
         h.bar = new View(this);
         LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
-                dp(3), dp(34));
+                dp(3), dp(30));
         lpBar.setMargins(dp(9), 0, dp(11), 0);
         h.row.addView(h.bar, lpBar);
 
@@ -1993,13 +2002,13 @@ public class MainActivity extends Activity {
         h.num.setTextColor(COLOR_HINT);
         h.num.setBackground(Skin.badge(th, false));
         h.num.setTypeface(android.graphics.Typeface.MONOSPACE);
-        LinearLayout.LayoutParams lpNum = new LinearLayout.LayoutParams(dp(26), dp(26));
+        LinearLayout.LayoutParams lpNum = new LinearLayout.LayoutParams(dp(24), dp(24));
         lpNum.setMargins(0, 0, dp(11), 0);
         h.row.addView(h.num, lpNum);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(0, dp(8), dp(8), dp(8));
+        content.setPadding(0, dp(6), dp(8), dp(6));
 
         h.main = new TextView(this);
         styleText(h.main, COLOR_TEXT, mainSp);

@@ -93,42 +93,45 @@
         android:layout_height="1dp"
         android:layout_marginTop="10dp" />
 
-    <!-- ===== 页签 ===== -->
+    <!-- ===== 页签：紧凑左对齐，不平分整行 =====
+         以前三个页签各占 1/3 屏宽：焦点块横跨 600px、非激活页签漂在大片空白里没有按钮形态。
+         改成 wrap 内容宽 + 固定间距后，焦点块贴住文字，剩余空间还给内容区。 -->
     <LinearLayout
         android:id="@+id/nav_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:paddingTop="10dp"
-        android:paddingBottom="4dp">
+        android:paddingBottom="6dp">
 
         <Button
             android:id="@+id/nav_hosts"
-            android:layout_width="0dp"
-            android:layout_height="50dp"
-            android:layout_weight="1"
-            android:layout_marginEnd="6dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginEnd="10dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
             android:stateListAnimator="@null"
             android:text="Hosts 管理"
             android:textSize="16sp" />
 
         <Button
             android:id="@+id/nav_qr"
-            android:layout_width="0dp"
-            android:layout_height="50dp"
-            android:layout_weight="1"
-            android:layout_marginStart="6dp"
-            android:layout_marginEnd="6dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginEnd="10dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
             android:stateListAnimator="@null"
             android:text="扫码配置"
             android:textSize="16sp" />
 
         <Button
             android:id="@+id/nav_cf"
-            android:layout_width="0dp"
-            android:layout_height="50dp"
-            android:layout_weight="1"
-            android:layout_marginStart="6dp"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
             android:stateListAnimator="@null"
             android:text="CF 优选"
             android:textSize="16sp" />

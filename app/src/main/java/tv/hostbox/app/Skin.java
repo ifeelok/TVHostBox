@@ -169,7 +169,9 @@ public final class Skin {
     }
 
     private static Drawable tabIdle(Theme t) {
-        return new ColorDrawable(0x00000000);
+        // 非激活页签也要有"按钮形态"：暗块 + 细描边，不再是一行漂在空白里的灰字
+        return solid(Theme.alpha(t.surface, t.light ? 0.85f : 0.7f),
+                Theme.alpha(t.border, 0.9f), 1.2f, 12);
     }
 
     // ==================== 列表行 ====================
