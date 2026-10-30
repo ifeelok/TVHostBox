@@ -108,6 +108,8 @@ public class MainActivity extends Activity {
     private TextView cfLiveStat;
     private TextView cfLiveFoot;
     private final List<LiveRow> liveRows = new ArrayList<LiveRow>();
+    private android.widget.ScrollView liveScroll;      // 过程表的滚动容器（行数多于可见高度时用）
+    private String lastPhaseRendered = "";             // 阶段切换时把表滚回顶部
     /** 延迟阶段：已通的那些 IP（按延迟升序展示） */
     private final List<CfOptimizer.Candidate> liveLat = new ArrayList<CfOptimizer.Candidate>();
     /** 测速阶段：候选池，mbps = -2 表示"正在测"，-1 失败，>0 为实测值 */
@@ -352,9 +354,9 @@ public class MainActivity extends Activity {
         } else if (index == 1) {
             return btnQrRefresh != null && btnQrRefresh.requestFocus();
         } else {
-            // 正在回看过程表时，焦点给「返回结果列表」；否则有结果进列表、没结果给「开始优选」
-            if (cfViewLive && btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) {
-                return btnCfPeek.requestFocus();
+            // 回看中：回到过程表本身（它有框态焦点），↑ 一次是表、再一次才是页签
+            if (cfViewLive && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+                return cfLive.requestFocus();
             }
             if (cfList != null && !cfResults.isEmpty()) {
                 cfList.focusBox();
@@ -522,12 +524,19 @@ public class MainActivity extends Activity {
      * 按「上」回到内容区——如果内容区是列表，直接回到刚才浏览的条目上。
      */
     private void wireButtonRow(final Button[] row, final View upTarget) {
+        wireButtonRow(row, upTarget, null);
+    }
+
+    /** upOverride 非空时，「上」交给它决定去哪（CF 页要按回看/结果/运行中分流） */
+    private void wireButtonRow(final Button[] row, final View upTarget, final Runnable upOverride) {
         for (int i = 0; i < row.length; i++) {
             final int idx = i;
             row[i].setOnKeyListener(new View.OnKeyListener() {
                 @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
                     if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP && upTarget != null) {
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                        if (upOverride != null) { upOverride.run(); return true; }
+                        if (upTarget == null) return false;
                         if (upTarget instanceof SideList) {
                             ((SideList) upTarget).focusEntered();
                             return true;
@@ -607,10 +616,8 @@ public class MainActivity extends Activity {
         Button btnSettings = actionButton("设置", Icons.SLIDERS, new View.OnClickListener() {
             @Override public void onClick(View v) { showSettingsDialog(); }
         });
-        Button btnUpdate = actionButton("检查更新", Icons.DOWNLOAD, new View.OnClickListener() {
-            @Override public void onClick(View v) { checkUpdateAsync(false); }
-        });
-        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings, btnUpdate};
+        // 「检查更新」挪进设置弹窗（整页重排后它有了固定座位）：按钮行只留这一页最高频的四件事
+        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings};
         addButtons(buttons, hostsButtonRow);
         wireButtonRow(hostsButtonRow, hostsList);
 
@@ -805,47 +812,152 @@ public class MainActivity extends Activity {
     // ==================== 设置 ====================
 
     /** 统一设置入口：主题 + 备份上限 + CF 优选参数 */
+    /**
+     * 设置页：整版重排成「分区标题 + 设置行」的 TV 列表，不再是一列等宽纯文字。
+     * 每行左侧是设置名、右侧是当前值，光标停上 = 亮块（和页内按钮同一套视觉语言），
+     * OK 进入对应的单选/动作。「检查更新」也从 Hosts 页按钮行挪到了这里——
+     * 更新是低频动作，占按钮行一整格太奢侈。
+     */
     private void showSettingsDialog() {
         int keep = prefs.getInt(HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
         int topN = prefs.getInt(PREF_CF_TOPN, 8);
         int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
         int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
-        final String[] items = {
-                "主题：" + th.name,
-                "备份保留数量：" + (keep <= 0 ? "不限制" : keep + " 份"),
-                "CF 优选保留条数：" + topN,
-                "CF 采样数量：" + sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
-                "CF 单 IP 测速流量：" + mb + " MB",
-                "检查更新（当前 v" + appVersion() + "）",
-                "启动时自动检查更新：" + (prefs.getBoolean(PREF_AUTO_UPDATE, true) ? "已开启" : "已关闭"),
-        };
-        newDialog()
-                .setTitle("设置    v" + appVersion())
-                .setItems(items, new android.content.DialogInterface.OnClickListener() {
-                    @Override public void onClick(android.content.DialogInterface d, int w) {
-                        if (w == 0) pickTheme();
-                        else if (w == 1) pickFromOptions("备份保留数量（写入时自动清理）",
-                                new String[]{"保留最近 10 份", "保留最近 20 份", "保留最近 50 份", "不限制"},
-                                new int[]{10, 20, 50, 0},
-                                HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
-                        else if (w == 2) pickFromOptions("CF 优选结果保留前几名",
-                                new String[]{"前 5 名", "前 8 名", "前 10 名", "前 15 名"},
-                                new int[]{5, 8, 10, 15},
-                                PREF_CF_TOPN, 8);
-                        else if (w == 3) pickFromOptions("CF 网段采样数量（越多越准越慢）",
-                                new String[]{"160 个（快）", "320 个（标准）", "640 个（充分）"},
-                                new int[]{160, 320, 640},
-                                PREF_CF_SAMPLE, 320);
-                        else if (w == 4) pickFromOptions("每个候选 IP 的测速下载量",
-                                new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
-                                new int[]{2, 6, 12},
-                                PREF_CF_DOWNLOAD_MB, 6);
-                        else if (w == 5) checkUpdateAsync(false);
-                        else if (w == 6) kickAutoUpdate();
-                    }
-                })
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(4), dp(24), 0);
+
+        settingsSection(box, "外观", true);
+        View first = settingRow(box, "主题", th.name, new View.OnClickListener() {
+            @Override public void onClick(View v) { pickTheme(); }
+        });
+        settingRow(box, "备份保留数量",
+                keep <= 0 ? "不限制" : keep + " 份", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                pickFromOptions("备份保留数量（写入时自动清理）",
+                        new String[]{"保留最近 10 份", "保留最近 20 份", "保留最近 50 份", "不限制"},
+                        new int[]{10, 20, 50, 0},
+                        HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
+            }
+        });
+
+        settingsSection(box, "Cloudflare 优选", false);
+        settingRow(box, "结果保留条数", "前 " + topN + " 名", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                pickFromOptions("CF 优选结果保留前几名",
+                        new String[]{"前 5 名", "前 8 名", "前 10 名", "前 15 名"},
+                        new int[]{5, 8, 10, 15},
+                        PREF_CF_TOPN, 8);
+            }
+        });
+        settingRow(box, "网段采样数量",
+                sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
+                new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                pickFromOptions("CF 网段采样数量（越多越准越慢）",
+                        new String[]{"160 个（快）", "320 个（标准）", "640 个（充分）"},
+                        new int[]{160, 320, 640},
+                        PREF_CF_SAMPLE, 320);
+            }
+        });
+        settingRow(box, "单 IP 测速流量", mb + " MB", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                pickFromOptions("每个候选 IP 的测速下载量",
+                        new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
+                        new int[]{2, 6, 12},
+                        PREF_CF_DOWNLOAD_MB, 6);
+            }
+        });
+
+        settingsSection(box, "应用", false);
+        settingRow(box, "检查更新", "当前 v" + appVersion(), new View.OnClickListener() {
+            @Override public void onClick(View v) { checkUpdateAsync(false); }
+        });
+        settingRow(box, "启动时自动检查更新",
+                prefs.getBoolean(PREF_AUTO_UPDATE, true) ? "已开启" : "已关闭",
+                new View.OnClickListener() {
+            @Override public void onClick(View v) { kickAutoUpdate(); }
+        });
+
+        AlertDialog dlg = newDialog()
+                .setTitle("设置")
+                .setView(box)
                 .setNegativeButton("关闭", null)
-                .show();
+                .create();
+        styleDialog(dlg);
+        dlg.show();
+        // 系统默认弹窗在电视上只有半屏宽，设置行左右两侧的"标签 / 当前值"会被挤到一起
+        android.view.Window w = dlg.getWindow();
+        if (w != null) w.setLayout(dp(640), ViewGroup.LayoutParams.WRAP_CONTENT);
+        // 初焦点给第一行设置项，而不是底部的「关闭」按钮
+        if (first != null) first.post(new Runnable() {
+            @Override public void run() { if (first != null) first.requestFocus(); }
+        });
+    }
+
+    /** 设置弹窗里的分区标题：小字号强调色，把 7 个设置项拆成三组好扫读 */
+    private void settingsSection(LinearLayout box, String title, boolean first) {
+        TextView tv = new TextView(this);
+        styleText(tv, COLOR_ACCENT, 12);
+        tv.setText(title);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = first ? dp(6) : dp(16);
+        box.addView(tv, lp);
+    }
+
+    /**
+     * 设置弹窗里的一行：左侧设置名，右侧当前值 + 「›」。
+     * 背景用 Skin.button（暗块描边 → 光标停上变实心亮块），和页内按钮同一套语言；
+     * 聚焦时文字色翻成亮块上的深色，不然白底上还是浅字就看不清了。
+     */
+    private View settingRow(LinearLayout box, String label, String value,
+                            View.OnClickListener onClick) {
+        final TextView tvLabel = new TextView(this);
+        styleText(tvLabel, COLOR_TEXT, 16);
+        tvLabel.setText(label);
+
+        final TextView tvValue = new TextView(this);
+        styleText(tvValue, COLOR_HINT, 14);
+        tvValue.setText(value);
+        tvValue.setGravity(Gravity.END);
+
+        final TextView chev = new TextView(this);
+        styleText(chev, COLOR_ACCENT, 16);
+        chev.setText("›");
+        chev.setGravity(Gravity.CENTER);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(52));
+        row.setBackground(Skin.button(th));
+        row.setFocusable(true);
+        row.setFocusableInTouchMode(false);
+        row.setOnClickListener(onClick);
+        row.addView(tvLabel, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams lpV = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpV.setMargins(dp(12), 0, dp(8), 0);
+        row.addView(tvValue, lpV);
+        row.addView(chev, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        row.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean hasFocus) {
+                tvLabel.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_TEXT);
+                tvValue.setTextColor(hasFocus
+                        ? Theme.alpha(COLOR_ON_FOCUS, 0.75f) : COLOR_HINT);
+                chev.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_ACCENT);
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        box.addView(row, lp);
+        return row;
     }
 
     /** 自动检查升级开关：改完回到设置总览，方便连续调 */
@@ -1650,12 +1762,14 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { toggleCfProcessView(); }
         });
         btnCfPeek.setVisibility(View.GONE);
-        btnCfStart.setContentDescription("OK 开始优选 · ←→ 换一个按钮 · ↑ 回页签");
-        btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回页签");
+        btnCfStart.setContentDescription("OK 开始优选 · ←→ 换一个按钮 · ↑ 回列表");
+        btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回列表");
 
         LinearLayout buttons = new LinearLayout(this);
         addButtons(buttons, new Button[]{btnCfPeek, btnCfStart});
-        wireButtonRow(new Button[]{btnCfPeek, btnCfStart}, navCfBtn);
+        wireButtonRow(new Button[]{btnCfPeek, btnCfStart}, navCfBtn, new Runnable() {
+            @Override public void run() { cfButtonRowUp(); }
+        });
 
         root.addView(title);
         root.addView(progCard);
@@ -1692,6 +1806,38 @@ public class MainActivity extends Activity {
         lpCard.topMargin = dp(12);
         card.setLayoutParams(lpCard);
 
+        // 回看时这张卡是可以"进入"的（框态）：按钮行按 ↑ 回到表上，表里 ↑ 才是页签。
+        // 以前它只是块不可聚焦的展示板，按钮行按 ↑ 直接跳到页签，回不到 IP 框子里。
+        card.setFocusable(true);
+        card.setFocusableInTouchMode(false);
+        card.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean hasFocus) {
+                v.setBackground(hasFocus ? Skin.cardFocus(th) : Skin.card(th));
+                if (hasFocus) setHint("OK 返回结果列表 · ↑ 回页签 · ↓ 回按钮行");
+            }
+        });
+        card.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    return navCfBtn != null && navCfBtn.requestFocus();
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (btnCfPeek != null && btnCfPeek.getVisibility() == View.VISIBLE) {
+                        return btnCfPeek.requestFocus();
+                    }
+                    return btnCfStart != null && btnCfStart.requestFocus();
+                }
+                // OK = 和「返回结果列表」按钮同一个动作，少绕一步
+                if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+                    toggleCfProcessView();
+                    return true;
+                }
+                return keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                        || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
+            }
+        });
+
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
@@ -1723,14 +1869,28 @@ public class MainActivity extends Activity {
         lpLine.bottomMargin = dp(2);
         card.addView(line, lpLine);
 
-        // 固定 6 行：720dp 高的屏上放得下，也不至于把面板撑得过满
-        for (int i = 0; i < 6; i++) {
+        // 行数跟随「CF 优选保留条数」设置：回顾表和结果列表一一对应，不再固定 6 行。
+        // 套一层 ScrollView，设置调成 10/15 名时也能全部看到。
+        int rows = Math.max(4, Math.min(15, prefs.getInt(PREF_CF_TOPN, 8)));
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        LinearLayout rowsBox = new LinearLayout(this);
+        rowsBox.setOrientation(LinearLayout.VERTICAL);
+        sv.addView(rowsBox, new android.widget.ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(sv);
+        liveScroll = sv;
+
+        liveRows.clear();
+        for (int i = 0; i < rows; i++) {
             LiveRow r = new LiveRow();
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setLayoutParams(new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(30)));
 
             r.rank = new TextView(this);
             r.rank.setGravity(Gravity.CENTER);
@@ -1766,8 +1926,8 @@ public class MainActivity extends Activity {
                     ViewGroup.LayoutParams.WRAP_CONTENT));
 
             r.root = row;
+            rowsBox.addView(row);
             liveRows.add(r);
-            card.addView(row);
         }
 
         cfLiveFoot = new TextView(this);
@@ -1964,8 +2124,8 @@ public class MainActivity extends Activity {
                             btnCfStart.setEnabled(true);
                             setBtnText(btnCfStart, cfHasRun ? "重新优选" : "开始优选");
                             btnCfStart.setContentDescription(cfHasRun
-                                    ? "OK 重新优选 · ←→ 换一个按钮 · ↑ 回页签"
-                                    : "OK 开始优选 · ←→ 换一个按钮 · ↑ 回页签");
+                                    ? "OK 重新优选 · ←→ 换一个按钮 · ↑ 回列表"
+                                    : "OK 开始优选 · ←→ 换一个按钮 · ↑ 回列表");
                             refreshBtnHint(btnCfStart);
                         }
                     });
@@ -2018,25 +2178,46 @@ public class MainActivity extends Activity {
             if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
             if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
             setBtnIcon(btnCfPeek, Icons.LIST, "返回结果列表");
-            btnCfPeek.setContentDescription("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 回页签");
+            btnCfPeek.setContentDescription("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 看过程表");
             refreshBtnHint(btnCfPeek);
             renderLiveBoard();   // 用最后一轮的过程数据重画（标题自动变成「测试回顾」）
             // 进度卡底下那行字两种视图关心的东西不一样，要跟着一起换
             if (tvCfProgress != null) tvCfProgress.setText(
                     "这是刚才那次任务的完整过程（按速度从高到低），不是正在跑。");
-            setHint("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 回页签");
+            setHint("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 看过程表");
         } else {
             if (cfLive != null) cfLive.setVisibility(View.GONE);
             if (cfList != null) cfList.setVisibility(View.VISIBLE);
             setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
-            btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回页签");
+            btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回列表");
             refreshBtnHint(btnCfPeek);
             if (tvCfProgress != null) tvCfProgress.setText(cfResults.isEmpty()
                     ? "这次没有可用的 IP，可以把采样数量调大，或换个时段再试。"
                     : "选中某条按 OK，即可写进指定域名的 hosts。");
             if (cfList != null && !cfResults.isEmpty()) cfList.focusEntered();
-            else setHint("OK 重新优选 · ←→ 换一个按钮 · ↑ 回页签");
+            else {
+                if (btnCfPeek != null) btnCfPeek.requestFocus();
+                setHint("OK 重新优选 · ←→ 换一个按钮 · ↑ 回列表");
+            }
         }
+    }
+
+    /**
+     * CF 按钮行按「上」去哪：
+     *   回看中 → 过程表（表里 ↑ 才是页签）；有结果 → 结果列表；运行中/空态 → 页签。
+     * 以前一律跳页签，真机上被吐槽"按上应该回到 IP 框子里"。
+     */
+    private void cfButtonRowUp() {
+        if (cfViewLive && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+            cfLive.requestFocus();
+            return;
+        }
+        if (!cfRunning && cfList != null && cfList.getVisibility() == View.VISIBLE
+                && !cfResults.isEmpty()) {
+            cfList.focusEntered();
+            return;
+        }
+        if (navCfBtn != null) navCfBtn.requestFocus();
     }
 
     /** 过程回调密度很高（320 个 IP），限流到约 9 fps，避免盒子卡在重绘上 */
@@ -2052,6 +2233,7 @@ public class MainActivity extends Activity {
 
     private void renderLiveBoard() {
         if (cfLive == null || cfLive.getVisibility() != View.VISIBLE) return;
+        final String renderPhase = cfFinished ? "review" : livePhase;
         // 跑完后再打开这张表就是「回看」，标题换成回顾口吻，别让人以为还在跑
         final String pfx = cfFinished ? "测试回顾 · " : "实时测试 · ";
         String phase;
@@ -2065,6 +2247,14 @@ public class MainActivity extends Activity {
             last = liveLast;
             if ("latency".equals(phase)) lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
             else if ("speed".equals(phase)) sp = new ArrayList<CfOptimizer.Candidate>(liveSpeed);
+        }
+
+        // 换了阶段（或切入回顾）就把表滚回第一行，别让人接着看上一次滚到一半的位置
+        if (liveScroll != null && !renderPhase.equals(lastPhaseRendered)) {
+            lastPhaseRendered = renderPhase;
+            liveScroll.post(new Runnable() {
+                @Override public void run() { if (liveScroll != null) liveScroll.scrollTo(0, 0); }
+            });
         }
 
         if (lat != null) {
@@ -2140,8 +2330,8 @@ public class MainActivity extends Activity {
                 }
             }
             cfLiveFoot.setText(last.isEmpty()
-                    ? (cfFinished ? "这次没有测速结果" : "同时测 8 个 IP，结果逐条落在这张表里")
-                    : "同时测 8 个    ·    " + (cfFinished ? "最后一条 " : "刚刚 ") + last);
+                    ? (cfFinished ? "这次没有测速结果" : "并发测速中，结果逐条落在这张表里")
+                    : "并发测速    ·    " + (cfFinished ? "最后一条 " : "刚刚 ") + last);
         } else {
             cfLiveTitle.setText(pfx + "采样");
             cfLiveStat.setText("");
