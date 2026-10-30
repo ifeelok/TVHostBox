@@ -100,6 +100,17 @@ public final class Skin {
         return solid(Theme.alpha(t.border, t.light ? 0.65f : 0.5f), 0, 0, 7);
     }
 
+    /**
+     * 亮块（光标行）上的序号徽章。
+     *
+     * badge(t, true) 用的是 focusBg——放在同色的亮块行上就是「白底白胶囊」，
+     * 整块糊成一片。这里改用 onFocus 的半透明底/描边：白块上是淡灰胶囊，
+     * 浅色主题的深块上是淡白胶囊，两种情况都还看得出这是一枚徽章。
+     */
+    public static Drawable badgeOnFocus(Theme t) {
+        return solid(Theme.alpha(t.onFocus, 0.13f), Theme.alpha(t.onFocus, 0.20f), 1, 7);
+    }
+
     /** 提示条 / 说明块底 */
     public static Drawable strip(Theme t) {
         return solid(Theme.alpha(t.surface, t.light ? 0.75f : 0.45f), Theme.alpha(t.border, 0.9f), 1, 12);

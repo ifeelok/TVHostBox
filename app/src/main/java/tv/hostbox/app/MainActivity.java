@@ -2404,6 +2404,19 @@ public class MainActivity extends Activity {
      * 数据是 cfResults——测速成功的全部（按速度降序），没有条数上限。
      * 光标停在 cfSel，窗口从 cfWinFrom 起画 liveRows.size() 行，超出就靠 ↑↓ 滚。
      */
+    /**
+     * 把语义色换算成「放在光标亮块上仍然读得清」的版本。
+     *
+     * 亮块（focusBg）在深色主题下是近白底、浅色主题下是深蓝底，所以方向不能写死：
+     * 白底把颜色往深压、深底往亮提，都朝 onFocus 靠——它是亮块上唯一的文字色。
+     * 只改明暗不动色相，绿=好 / 蓝=一般 / 灰=差这套分级仍然成立。
+     */
+    private int onBlock(int color, boolean hot) {
+        if (!hot) return color;
+        float t = Theme.luma(COLOR_FOCUS_BG) > 0.5f ? 0.70f : 0.55f;
+        return Theme.mix(color, COLOR_ON_FOCUS, t);
+    }
+
     private void renderResultGrid(List<CfOptimizer.Candidate> lat) {
         int n = liveRows.size();
         if (cfSel >= cfResults.size()) cfSel = Math.max(0, cfResults.size() - 1);
@@ -2429,28 +2442,30 @@ public class MainActivity extends Activity {
             if (pos >= cfResults.size()) { blankLiveRow(r); continue; }
             CfOptimizer.Candidate c = cfResults.get(pos);
             boolean selected = pos == cfSel;
-            // 光标行整块提亮（和列表页同一套观感），未选中行只靠数字和颜色分档
+            // 光标行走「亮块」：深色主题下这块是纯白底，行里原来的亮色文字压上去直接看不见
+            // （之前 IP 白色压白色，选中反而糊成一片）。hot 状态下所有文字/色条都换成压深版。
+            boolean hot = selected && cfBoardFocused;
             r.root.setBackground(selected ? Skin.row(th, true, cfBoardFocused) : null);
             r.rank.setText(pad2(pos + 1));
-            r.rank.setTextColor(selected && cfBoardFocused ? COLOR_ON_FOCUS : COLOR_ACCENT);
-            r.rank.setBackground(Skin.badge(th, selected && cfBoardFocused));
+            r.rank.setTextColor(hot ? COLOR_ON_FOCUS : COLOR_ACCENT);
+            r.rank.setBackground(hot ? Skin.badgeOnFocus(th) : Skin.badge(th, false));
             r.ip.setText(c.ip);
-            r.ip.setTextColor(c.mbps > 0 ? COLOR_TEXT : COLOR_HINT);
+            r.ip.setTextColor(hot ? COLOR_ON_FOCUS : (c.mbps > 0 ? COLOR_TEXT : COLOR_HINT));
             if (c.mbps > 0) {
                 r.metric.setText(String.format("%.1f Mbps", c.mbps));
-                r.metric.setTextColor(COLOR_OK);
-                r.bar.setFillColor(COLOR_OK);
+                r.metric.setTextColor(onBlock(COLOR_OK, hot));
+                r.bar.setFillColor(onBlock(COLOR_OK, hot));
                 r.bar.setProgress(Math.min(1f, (float) (c.mbps / 40f)));
             } else {
                 r.metric.setText("未测速");
-                r.metric.setTextColor(COLOR_HINT);
-                r.bar.setFillColor(COLOR_HINT);
+                r.metric.setTextColor(onBlock(COLOR_HINT, hot));
+                r.bar.setFillColor(onBlock(COLOR_HINT, hot));
                 r.bar.setProgress(0f);
             }
             int rtt = c.rttMs;
             r.lat.setText(rtt < 0 ? "—" : rtt + " ms");
-            r.lat.setTextColor(rtt < 0 ? COLOR_HINT
-                    : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT);
+            r.lat.setTextColor(onBlock(rtt < 0 ? COLOR_HINT
+                    : rtt <= 80 ? COLOR_OK : rtt <= 180 ? COLOR_ACCENT : COLOR_HINT, hot));
             r.lat.setVisibility(View.VISIBLE);
             r.metric.setVisibility(View.VISIBLE);
         }
@@ -2646,6 +2661,7 @@ public class MainActivity extends Activity {
         r.root.setBackground(null);   // 清掉成绩单/选中行的底色残留
         r.rank.setText("–");
         r.rank.setTextColor(COLOR_HINT);
+        r.rank.setBackground(Skin.badge(th, false));   // 别把光标行的胶囊样式带到空行上
         r.ip.setText("");
         r.lat.setText("");
         r.lat.setTextColor(COLOR_HINT);
