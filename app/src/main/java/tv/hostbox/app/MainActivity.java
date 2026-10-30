@@ -1832,6 +1832,7 @@ public class MainActivity extends Activity {
         // 跑的时候只留主按钮：过程自动展示，没有"回看"这回事
         if (btnCfPeek != null) btnCfPeek.setVisibility(View.GONE);
         btnCfStart.setContentDescription("OK 取消优选（再按一次中止）· ←→ 换一个按钮");
+        refreshBtnHint(btnCfStart);
         cfResults.clear();
         // 跑的时候：藏结果列表、亮实时面板——同一块区域，不让用户看到两套东西
         if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
@@ -1965,6 +1966,7 @@ public class MainActivity extends Activity {
                             btnCfStart.setContentDescription(cfHasRun
                                     ? "OK 重新优选 · ←→ 换一个按钮 · ↑ 回页签"
                                     : "OK 开始优选 · ←→ 换一个按钮 · ↑ 回页签");
+                            refreshBtnHint(btnCfStart);
                         }
                     });
                 }
@@ -2017,6 +2019,7 @@ public class MainActivity extends Activity {
             if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
             setBtnIcon(btnCfPeek, Icons.LIST, "返回结果列表");
             btnCfPeek.setContentDescription("OK 返回结果列表 · ←→ 换一个按钮 · ↑ 回页签");
+            refreshBtnHint(btnCfPeek);
             renderLiveBoard();   // 用最后一轮的过程数据重画（标题自动变成「测试回顾」）
             // 进度卡底下那行字两种视图关心的东西不一样，要跟着一起换
             if (tvCfProgress != null) tvCfProgress.setText(
@@ -2027,6 +2030,7 @@ public class MainActivity extends Activity {
             if (cfList != null) cfList.setVisibility(View.VISIBLE);
             setBtnIcon(btnCfPeek, Icons.CLOCK, "查看测试过程");
             btnCfPeek.setContentDescription("OK 查看测试过程 · ←→ 换一个按钮 · ↑ 回页签");
+            refreshBtnHint(btnCfPeek);
             if (tvCfProgress != null) tvCfProgress.setText(cfResults.isEmpty()
                     ? "这次没有可用的 IP，可以把采样数量调大，或换个时段再试。"
                     : "选中某条按 OK，即可写进指定域名的 hosts。");
@@ -2293,6 +2297,18 @@ public class MainActivity extends Activity {
                     0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         return ss;
+    }
+
+    /**
+     * 按钮 contentDescription 变了就重放提示条。
+     * 提示条只在获得焦点那一刻读取 CD；按钮正被光标停着时换语义（开始→取消），
+     * onFocusChange 不会再触发，底部会一直显示旧动作——真机上抓到过这个错。
+     */
+    private void refreshBtnHint(Button b) {
+        if (b != null && b.hasFocus()) {
+            CharSequence cd = b.getContentDescription();
+            setHint(cd != null && cd.length() > 0 ? cd.toString() : "");
+        }
     }
 
     /** 带图标的按钮文字更新（setText 会把图标冲掉，必须重建 Spannable） */
