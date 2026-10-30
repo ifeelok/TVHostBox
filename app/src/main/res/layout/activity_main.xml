@@ -84,6 +84,19 @@
                 android:textColor="#93A1B8"
                 android:textSize="13sp" />
         </LinearLayout>
+
+        <!-- 有新版本时才出现：默认 GONE，不占位。只做提示，操作入口在「检查更新」按钮 -->
+        <TextView
+            android:id="@+id/update_pill"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="7dp"
+            android:paddingBottom="7dp"
+            android:textSize="13sp"
+            android:visibility="gone" />
     </LinearLayout>
 
     <!-- 顶栏下的一条细线：左浓右淡，给画面一点层次 -->

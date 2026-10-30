@@ -43,9 +43,17 @@ public final class RootShell {
 
     /** 以 root 执行一段 shell 脚本（可多行）。带一次会话重建重试。 */
     public static Result run(String script) {
+        return run(script, TIMEOUT_MS);
+    }
+
+    /**
+     * 同上，但可自定义超时。
+     * pm install 这类操作在低端盒子上可能要几十秒，用默认 20s 会被看门狗误杀。
+     */
+    public static Result run(String script, int timeoutMs) {
         synchronized (LOCK) {
             for (int attempt = 0; attempt < 2; attempt++) {
-                Result r = runOnce(script);
+                Result r = runOnce(script, timeoutMs);
                 if (r != null) return r;
                 resetSession(); // 会话已坏，重建后重试
             }
@@ -54,7 +62,7 @@ public final class RootShell {
     }
 
     /** 单次尝试；返回 null 表示会话失效需要重建 */
-    private static Result runOnce(String script) {
+    private static Result runOnce(String script, int timeoutMs) {
         try {
             if (!ensureSession()) return null;
 
@@ -63,7 +71,7 @@ public final class RootShell {
             Thread watchdog = new Thread(new Runnable() {
                 @Override public void run() {
                     try {
-                        Thread.sleep(TIMEOUT_MS);
+                        Thread.sleep(timeoutMs);
                         p.destroy();
                     } catch (InterruptedException ignored) {}
                 }

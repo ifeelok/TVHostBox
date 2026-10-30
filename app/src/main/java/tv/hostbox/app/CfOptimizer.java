@@ -64,6 +64,31 @@ public final class CfOptimizer {
         void onProgress(String phase, int done, int total, String detail);
     }
 
+    /**
+     * 逐 IP 的过程回调（可选）。
+     *
+     * 只有 {@link Progress} 的话，界面上只能看到「存活 42 / 已测 128」这种聚合数字——
+     * 每个 IP 的测试结果一闪而过、跑完就没了，用户看不出「到底在测什么」。
+     * 这里把单条结果抛给界面，界面才能把过程本身画成一张实时表。
+     *
+     * 回调发生在工作线程（测速阶段最多 8 个并发），实现方自行加锁。
+     */
+    public interface IpListener {
+        /** 延迟测试完成：rttMs >= 0 表示通，< 0 表示不通（超时/拒绝） */
+        void onLatencyTested(String ip, int rttMs);
+
+        /** 开始对该 IP 做下载测速（此时还没有速度，界面可以先显示"测速中"） */
+        void onSpeedStarted(String ip);
+
+        /** 下载测速完成：mbps > 0 为实测速度，< 0 为失败 */
+        void onSpeedMeasured(String ip, double mbps);
+    }
+
+    private volatile IpListener ipListener;
+
+    /** 设置逐 IP 回调（null = 不关心过程，只要最终结果） */
+    public void setIpListener(IpListener l) { this.ipListener = l; }
+
     private volatile boolean cancelled = false;
 
     /** 请求取消优选，optimize 会尽快以 InterruptedException 结束 */
@@ -110,9 +135,12 @@ public final class CfOptimizer {
                         c.rttMs = rtt;
                         latencyOk.add(c);
                     }
+                    IpListener il = ipListener;
+                    if (il != null) il.onLatencyTested(ip, rtt);
                     int d = done.incrementAndGet();
                     if (d % 32 == 0) {
-                        progress.onProgress("latency", d, ips.size(), "存活 " + latencyOk.size());
+                        progress.onProgress("latency", d, ips.size(), "已测 " + d + " / " + ips.size()
+                                + " · 存活 " + latencyOk.size());
                     }
                 }
             });
@@ -140,7 +168,10 @@ public final class CfOptimizer {
             pool2.execute(new Runnable() {
                 @Override public void run() {
                     if (cancelled) return;
+                    IpListener il = ipListener;
+                    if (il != null) il.onSpeedStarted(c.ip);
                     c.mbps = downloadSpeed(c.ip, downloadBytes, 8000);
+                    if (il != null) il.onSpeedMeasured(c.ip, c.mbps);
                     progress.onProgress("speed", done2.incrementAndGet(), speedPool.size(),
                             c.ip + " → " + (c.mbps < 0 ? "失败" : String.format("%.1f Mbps", c.mbps)));
                 }

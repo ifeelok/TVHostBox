@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.SpannableString;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -27,6 +29,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -92,10 +95,41 @@ public class MainActivity extends Activity {
     private volatile boolean cfRunning = false;
     private volatile CfOptimizer cfOpt = null; // 当前优选任务（用于取消）
 
+    // ---- CF 实时测试面板：跑的时候用来「看见过程」，跑完再切回结果列表 ----
+    private LinearLayout cfLive;
+    private TextView cfLiveTitle;
+    private TextView cfLiveStat;
+    private TextView cfLiveFoot;
+    private final List<LiveRow> liveRows = new ArrayList<LiveRow>();
+    /** 延迟阶段：已通的那些 IP（按延迟升序展示） */
+    private final List<CfOptimizer.Candidate> liveLat = new ArrayList<CfOptimizer.Candidate>();
+    /** 测速阶段：候选池，mbps = -2 表示"正在测"，-1 失败，>0 为实测值 */
+    private final List<CfOptimizer.Candidate> liveSpeed = new ArrayList<CfOptimizer.Candidate>();
+    private final Object liveLock = new Object();
+    private String livePhase = "";
+    private int liveDone = 0, liveTotal = 0;
+    private String liveLast = "";
+    private boolean liveRenderQueued = false;
+
+    /** 主线程渲染句柄：过程回调非常密集（采样 320 个 IP），必须限流后再画 */
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final Runnable liveRenderTask = new Runnable() {
+        @Override public void run() {
+            liveRenderQueued = false;
+            renderLiveBoard();
+        }
+    };
+
     // 设置项 key（CF 参数）
     private static final String PREF_CF_TOPN = "cfTopN";        // 保留前几名，默认 8
     private static final String PREF_CF_SAMPLE = "cfSample";    // 采样数量，默认 320
     private static final String PREF_CF_DOWNLOAD_MB = "cfDownloadMB"; // 测速大小 MB，默认 6
+    private static final String PREF_AUTO_UPDATE = "autoUpdate"; // 启动时自动检查升级，默认开
+
+    // 升级
+    private TextView tvUpdatePill;
+    private volatile boolean updateChecking = false;
+    private AlertDialog updateDlg;
 
     private SharedPreferences prefs;
     private int currentTab = 0;
@@ -141,6 +175,11 @@ public class MainActivity extends Activity {
         imgRootIcon.setImageDrawable(Icons.drawable(this, Icons.DOT, 14, th.hint));
 
         findViewById(R.id.hair_line).setBackground(Skin.hairline(th));
+
+        // 顶栏「有新版本」小胶囊：只在新版可用时显示，起提示作用（入口在「检查更新」按钮）
+        tvUpdatePill = findViewById(R.id.update_pill);
+        tvUpdatePill.setTextColor(COLOR_ACCENT);
+        tvUpdatePill.setBackground(Skin.pill(th, th.accent));
 
         // 底部按键提示：键帽 + 说明，遥控器不用猜现在能按什么
         hintRow = findViewById(R.id.hint_row);
@@ -222,6 +261,13 @@ public class MainActivity extends Activity {
 
         loadHostsAsync();
         checkRootAsync();
+
+        // 自动检查升级：延后几秒，先让界面和 hosts 读完，别和启动抢网络/CPU
+        if (prefs.getBoolean(PREF_AUTO_UPDATE, true)) {
+            ui.postDelayed(new Runnable() {
+                @Override public void run() { checkUpdateAsync(true); }
+            }, 3500);
+        }
     }
 
     @Override
@@ -546,7 +592,10 @@ public class MainActivity extends Activity {
         Button btnSettings = actionButton("设置", Icons.SLIDERS, new View.OnClickListener() {
             @Override public void onClick(View v) { showSettingsDialog(); }
         });
-        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings};
+        Button btnUpdate = actionButton("检查更新", Icons.DOWNLOAD, new View.OnClickListener() {
+            @Override public void onClick(View v) { checkUpdateAsync(false); }
+        });
+        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings, btnUpdate};
         addButtons(buttons, hostsButtonRow);
         wireButtonRow(hostsButtonRow, hostsList);
 
@@ -752,6 +801,8 @@ public class MainActivity extends Activity {
                 "CF 优选保留条数：" + topN,
                 "CF 采样数量：" + sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
                 "CF 单 IP 测速流量：" + mb + " MB",
+                "检查更新（当前 v" + appVersion() + "）",
+                "启动时自动检查更新：" + (prefs.getBoolean(PREF_AUTO_UPDATE, true) ? "已开启" : "已关闭"),
         };
         newDialog()
                 .setTitle("设置    v" + appVersion())
@@ -774,9 +825,31 @@ public class MainActivity extends Activity {
                                 new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
                                 new int[]{2, 6, 12},
                                 PREF_CF_DOWNLOAD_MB, 6);
+                        else if (w == 5) checkUpdateAsync(false);
+                        else if (w == 6) kickAutoUpdate();
                     }
                 })
                 .setNegativeButton("关闭", null)
+                .show();
+    }
+
+    /** 自动检查升级开关：改完回到设置总览，方便连续调 */
+    private void kickAutoUpdate() {
+        final boolean on = prefs.getBoolean(PREF_AUTO_UPDATE, true);
+        newDialog()
+                .setTitle("启动时自动检查更新")
+                .setSingleChoiceItems(new String[]{"开启（推荐）", "关闭"}, on ? 0 : 1,
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override public void onClick(android.content.DialogInterface d, int w) {
+                                prefs.edit().putBoolean(PREF_AUTO_UPDATE, w == 0).apply();
+                                d.dismiss();
+                                toast(w == 0 ? "已开启：启动时会自动检查新版本" : "已关闭自动检查更新");
+                                ui.postDelayed(new Runnable() {
+                                    @Override public void run() { showSettingsDialog(); }
+                                }, 240);
+                            }
+                        })
+                .setNegativeButton("取消", null)
                 .show();
     }
 
@@ -838,6 +911,233 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    // ==================== 检查升级 ====================
+
+    /**
+     * @param silent true = 启动时的后台自动检查（不打扰，只在有新版本时冒个提示）；
+     *               false = 用户主动点「检查更新」，所有结果都要有反馈
+     */
+    private void checkUpdateAsync(final boolean silent) {
+        if (updateChecking) {
+            if (!silent) toast("正在检查中…");
+            return;
+        }
+        updateChecking = true;
+        if (!silent) toast("正在检查新版本…");
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                UpdateChecker.Info found = null;
+                String err = null;
+                try {
+                    found = UpdateChecker.fetchLatest();
+                } catch (Exception e) {
+                    err = e.getMessage() == null ? e.toString() : e.getMessage();
+                }
+                final UpdateChecker.Info info = found;
+                final String fErr = err;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        updateChecking = false;
+                        if (fErr != null) {
+                            // 网络不通/被墙在电视盒子上很常见，说清原因而不是干等；
+                            // 启动时的后台检查失败则不打扰（国内网络访问 GitHub 本来就不稳）
+                            if (!silent) {
+                                showInfoDialog("检查更新失败",
+                                        "连不上 GitHub：\n" + fErr
+                                                + "\n\n盒子需要能访问 github.com；也可以在浏览器里打开"
+                                                + "\nhttps://github.com/ifeelok/TVHostBox/releases");
+                            }
+                            return;
+                        }
+                        if (!UpdateChecker.isNewer(info.tag, appVersion())) {
+                            hideUpdatePill();
+                            if (!silent) {
+                                showInfoDialog("已是最新版本",
+                                        "当前 v" + appVersion() + "\n远端最新 " + info.tag);
+                            }
+                            return;
+                        }
+                        showUpdatePill(info.tag);
+                        if (silent) {
+                            toast("发现新版本 " + info.tag + "，可用「检查更新」升级");
+                        } else {
+                            showUpdateDialog(info);
+                        }
+                    }
+                });
+            }
+        }, "check-update").start();
+    }
+
+    private void showInfoDialog(String title, String msg) {
+        newDialog().setTitle(title).setMessage(msg).setPositiveButton("知道了", null).show();
+    }
+
+    /** 有新版本时顶栏右侧出现一枚小胶囊；传 null 表示"检查失败"，用警告色 */
+    private void showUpdatePill(String tag) {
+        if (tvUpdatePill == null) return;
+        if (tag == null) {
+            tvUpdatePill.setText("检查更新失败");
+            tvUpdatePill.setTextColor(COLOR_HINT);
+            tvUpdatePill.setBackground(Skin.pill(th, th.hint));
+        } else {
+            tvUpdatePill.setText("可升级 " + tag);
+            tvUpdatePill.setTextColor(COLOR_ACCENT);
+            tvUpdatePill.setBackground(Skin.pill(th, th.accent));
+        }
+        tvUpdatePill.setVisibility(View.VISIBLE);
+    }
+
+    private void hideUpdatePill() {
+        if (tvUpdatePill != null) tvUpdatePill.setVisibility(View.GONE);
+    }
+
+    private void showUpdateDialog(final UpdateChecker.Info info) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("当前 v").append(appVersion()).append("    →    最新 ").append(info.tag);
+        if (info.size > 0) {
+            sb.append("\n安装包 ").append(String.format("%.1f MB", info.size / 1048576.0));
+        }
+        String notes = releaseNotes(info.body);
+        if (notes.length() > 0) sb.append("\n\n").append(notes);
+        sb.append("\n\n更新会覆盖安装，hosts 与设置都保留。");
+
+        newDialog()
+                .setTitle("发现新版本")
+                .setMessage(sb.toString())
+                .setPositiveButton("立即更新", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        startUpdateDownload(info);
+                    }
+                })
+                .setNegativeButton("稍后", null)
+                .show();
+    }
+
+    /** 发布说明是 Markdown：去掉符号、压成两三行，电视上一屏能读完 */
+    private String releaseNotes(String body) {
+        if (body == null) return "";
+        String s = body.replace("\r", "")
+                .replaceAll("(?m)^#{1,6}\\s*", "")
+                .replace("**", "").replace("`", "")
+                .replaceAll("(?m)^[-*]\\s+", "· ")
+                .replaceAll("\n{2,}", "\n")
+                .trim();
+        if (s.length() > 260) s = s.substring(0, 260) + "…";
+        return s;
+    }
+
+    /** 下载 → root 静默安装（本项目只在已 root 的盒子上用，非 root 退回浏览器下载） */
+    private void startUpdateDownload(final UpdateChecker.Info info) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(22);
+        box.setPadding(pad, dp(14), pad, 0);
+
+        final TextView tvState = new TextView(this);
+        styleText(tvState, COLOR_TEXT, 15);
+        tvState.setText("准备下载…");
+        box.addView(tvState);
+
+        final Bar bar = new Bar(this, Theme.alpha(th.text, th.light ? 0.14f : 0.16f), COLOR_ACCENT);
+        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(7));
+        lpBar.topMargin = dp(12);
+        box.addView(bar, lpBar);
+
+        final TextView tvNote = new TextView(this);
+        styleText(tvNote, COLOR_HINT, 12);
+        tvNote.setLineSpacing(dp(3), 1f);
+        tvNote.setText("装好之后应用会自动重启，hosts 与设置不受影响。");
+        LinearLayout.LayoutParams lpNote = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpNote.topMargin = dp(10);
+        box.addView(tvNote, lpNote);
+
+        if (updateDlg != null && updateDlg.isShowing()) updateDlg.dismiss();
+        updateDlg = newDialog()
+                .setTitle("更新到 " + info.tag)
+                .setView(box)
+                .setNegativeButton("取消", null)
+                .create();
+        updateDlg.show();
+
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final File apk = new File(getCacheDir(), "update.apk");
+                try {
+                    UpdateChecker.download(info.apkUrl, apk, new UpdateChecker.DownloadProgress() {
+                        @Override public void onProgress(final long done, final long total) {
+                            ui.post(new Runnable() {
+                                @Override public void run() {
+                                    if (total > 0) bar.setProgress(done / (float) total);
+                                    tvState.setText(total > 0
+                                            ? "正在下载 " + (done * 100 / total) + "%   （"
+                                                    + mbText(done) + " / " + mbText(total) + "）"
+                                            : "正在下载 " + mbText(done));
+                                }
+                            });
+                        }
+                    });
+
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            bar.setProgress(1f);
+                            tvState.setText("下载完成，正在安装…");
+                            tvNote.setText("安装时应用会短暂关闭并自动重启。");
+                        }
+                    });
+                    Thread.sleep(700);   // 让上面这行字先显示出来
+
+                    // root 静默安装：先落到 /data/local/tmp（adb install 用的同一路径，
+                    // 系统包管理器对这个位置有读权限），装完再自启
+                    String cmd = "cp '" + apk.getAbsolutePath() + "' /data/local/tmp/tvhostbox_update.apk\n"
+                            + "chmod 644 /data/local/tmp/tvhostbox_update.apk\n"
+                            + "pm install -r /data/local/tmp/tvhostbox_update.apk\n"
+                            + "RC=$?\n"
+                            + "rm -f /data/local/tmp/tvhostbox_update.apk\n"
+                            + "if [ $RC -eq 0 ]; then sleep 1; am start -n tv.hostbox.app/.MainActivity >/dev/null 2>&1; fi\n"
+                            + "echo hostbox_rc=$RC";
+                    final RootShell.Result r = RootShell.run(cmd, 180000);
+                    final boolean ok = r.ok && r.output.contains("Success");
+
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            try { apk.delete(); } catch (Exception ignored) {}
+                            if (ok) {
+                                hideUpdatePill();
+                                tvState.setText("更新完成，应用正在重启…");
+                                tvNote.setText("若没有自动打开，请手动启动「电视Host管家」。");
+                            } else {
+                                showUpdatePill(info.tag);
+                                tvState.setText("自动安装失败");
+                                tvNote.setText("可以到发布页手动下载安装：\n" + info.htmlUrl + "\n\n"
+                                        + (r.output.length() > 200
+                                                ? r.output.substring(0, 200) + "…" : r.output));
+                            }
+                        }
+                    });
+                } catch (final Exception e) {
+                    ui.post(new Runnable() {
+                        @Override public void run() {
+                            try { apk.delete(); } catch (Exception ignored) {}
+                            tvState.setText("更新失败");
+                            tvNote.setText("原因：" + e + "\n\n也可以到发布页手动下载：\n"
+                                    + info.htmlUrl);
+                        }
+                    });
+                }
+            }
+        }, "update-download").start();
+    }
+
+    private static String mbText(long bytes) {
+        if (bytes >= 1048576) return String.format("%.1f MB", bytes / 1048576.0);
+        if (bytes >= 1024) return (bytes / 1024) + " KB";
+        return bytes + " B";
     }
 
     /** 换主题：存下选择后重建界面（所有背景都是按调色板现画的，重建即生效） */
@@ -1255,11 +1555,15 @@ public class MainActivity extends Activity {
         lpDet.topMargin = dp(8);
         progCard.addView(tvCfProgress, lpDet);
 
+        // 结果列表：跑完之后才出现（跑的时候用上面的实时面板占这块位置）
         cfList = new CfSideList();
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         lp.topMargin = dp(12);
         cfList.setLayoutParams(lp);
+
+        // 实时测试面板：和结果列表占同一块区域，同一时刻只显示一个
+        cfLive = buildCfLiveBoard();
 
         // 主 CTA 放底部按钮行（与 Hosts 页「添加条目」同构）：
         // 之前挤在标题行右侧，标题比按钮矮，按钮上沿被父容器裁掉——层级和高度都不可控
@@ -1273,16 +1577,134 @@ public class MainActivity extends Activity {
 
         root.addView(title);
         root.addView(progCard);
+        root.addView(cfLive);
         root.addView(cfList);
         root.addView(buttons);
         return root;
     }
 
-    /** 极简进度条：6dp 圆角轨道 + 强调色填充，比一行数字更直观 */
+    /** 实时面板的一行：序号 + IP + 质量条 + 指标 */
+    private static final class LiveRow {
+        LinearLayout root;
+        TextView rank;
+        TextView ip;
+        TextView metric;
+        Bar bar;
+    }
+
+    /**
+     * 实时测试面板。
+     *
+     * 之前跑优选时，中间一大块只有一句「TCP 延迟测试中…」，每个 IP 的结果一行闪过、
+     * 跑完就没了——用户既看不出在测什么，也判断不了质量分布。这里把过程本身画成一张表：
+     * 序号 / IP / 质量条 / 延迟或速度，按「当前最好的排前面」实时刷新。
+     */
+    private LinearLayout buildCfLiveBoard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(Skin.card(th));
+        card.setPadding(dp(16), dp(12), dp(16), dp(10));
+        card.setVisibility(View.GONE);
+        LinearLayout.LayoutParams lpCard = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lpCard.topMargin = dp(12);
+        card.setLayoutParams(lpCard);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        cfLiveTitle = new TextView(this);
+        cfLiveTitle.setText("实时测试");
+        cfLiveTitle.setTextColor(COLOR_TEXT);
+        cfLiveTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        cfLiveTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+
+        cfLiveStat = new TextView(this);
+        cfLiveStat.setText("");
+        cfLiveStat.setTextColor(COLOR_HINT);
+        cfLiveStat.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        cfLiveStat.setTypeface(android.graphics.Typeface.MONOSPACE);
+        cfLiveStat.setGravity(Gravity.END);
+
+        head.addView(cfLiveTitle, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(cfLiveStat, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(head);
+
+        View line = new View(this);
+        line.setBackgroundColor(Theme.alpha(th.text, th.light ? 0.12f : 0.14f));
+        LinearLayout.LayoutParams lpLine = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        lpLine.topMargin = dp(8);
+        lpLine.bottomMargin = dp(2);
+        card.addView(line, lpLine);
+
+        // 固定 6 行：720dp 高的屏上放得下，也不至于把面板撑得过满
+        for (int i = 0; i < 6; i++) {
+            LiveRow r = new LiveRow();
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
+
+            r.rank = new TextView(this);
+            r.rank.setGravity(Gravity.CENTER);
+            r.rank.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            r.rank.setTypeface(android.graphics.Typeface.MONOSPACE);
+            r.rank.setTextColor(COLOR_HINT);
+            r.rank.setBackground(Skin.badge(th, false));
+            row.addView(r.rank, new LinearLayout.LayoutParams(dp(24), dp(24)));
+
+            r.ip = new TextView(this);
+            r.ip.setTextColor(COLOR_TEXT);
+            r.ip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            r.ip.setTypeface(android.graphics.Typeface.MONOSPACE);
+            r.ip.setSingleLine(true);
+            r.ip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams lpIp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lpIp.setMargins(dp(12), 0, dp(10), 0);
+            row.addView(r.ip, lpIp);
+
+            r.bar = new Bar(this, Theme.alpha(th.text, th.light ? 0.12f : 0.14f), COLOR_ACCENT);
+            LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(dp(88), dp(6));
+            lpBar.setMargins(0, 0, dp(12), 0);
+            row.addView(r.bar, lpBar);
+
+            r.metric = new TextView(this);
+            r.metric.setTextColor(COLOR_HINT);
+            r.metric.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+            r.metric.setTypeface(android.graphics.Typeface.MONOSPACE);
+            r.metric.setGravity(Gravity.END);
+            r.metric.setSingleLine(true);
+            row.addView(r.metric, new LinearLayout.LayoutParams(dp(104),
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            r.root = row;
+            liveRows.add(r);
+            card.addView(row);
+        }
+
+        cfLiveFoot = new TextView(this);
+        cfLiveFoot.setTextColor(COLOR_HINT);
+        cfLiveFoot.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        cfLiveFoot.setSingleLine(true);
+        cfLiveFoot.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lpFoot = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpFoot.topMargin = dp(8);
+        card.addView(cfLiveFoot, lpFoot);
+        return card;
+    }
+
+    /** 极简进度条：圆角轨道 + 强调色填充，比一行数字更直观 */
     private static class Bar extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final int trackColor;
-        private final int fillColor;
+        private int fillColor;
         private float progress = 0f;
 
         Bar(Context c, int trackColor, int fillColor) {
@@ -1294,6 +1716,11 @@ public class MainActivity extends Activity {
         void setProgress(float p) {
             this.progress = Math.max(0f, Math.min(1f, p));
             invalidate();
+        }
+
+        /** 实时面板里每行的质量条要按数值换色（好=绿 / 一般=强调色 / 差=灰） */
+        void setFillColor(int c) {
+            if (this.fillColor != c) { this.fillColor = c; invalidate(); }
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -1319,7 +1746,11 @@ public class MainActivity extends Activity {
         cfRunning = true;
         setBtnText(btnCfStart, "取消优选");
         cfResults.clear();
-        if (cfList != null) cfList.resetList();
+        // 跑的时候：藏结果列表、亮实时面板——同一块区域，不让用户看到两套东西
+        if (cfList != null) { cfList.resetList(); cfList.setVisibility(View.GONE); }
+        if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
+        setLivePhase("sample");
+        renderLiveBoard();
         if (tvCfPhase != null) tvCfPhase.setText("采样网段");
         if (tvCfPct != null) tvCfPct.setText("0%");
         if (barCf != null) barCf.setProgress(0f);
@@ -1330,12 +1761,56 @@ public class MainActivity extends Activity {
         int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
         final CfOptimizer opt = new CfOptimizer(sample, Math.max(16, sample / 13), topN, mb * 1024 * 1024);
         cfOpt = opt;
+        // 逐 IP 回调：把「每个 IP 测得怎么样」交给实时面板，而不是只留一行汇总
+        opt.setIpListener(new CfOptimizer.IpListener() {
+            @Override public void onLatencyTested(String ip, int rttMs) {
+                synchronized (liveLock) {
+                    setLivePhase("latency");   // 内部判重，第一次调用才清表
+                    liveDone++;
+                    if (rttMs >= 0) {
+                        CfOptimizer.Candidate c = new CfOptimizer.Candidate(ip);
+                        c.rttMs = rttMs;
+                        liveLat.add(c);
+                    }
+                    liveLast = ip + (rttMs >= 0 ? "  →  " + rttMs + " ms" : "  →  不通");
+                }
+                scheduleLiveRender();
+            }
+
+            @Override public void onSpeedStarted(String ip) {
+                synchronized (liveLock) {
+                    setLivePhase("speed");
+                    CfOptimizer.Candidate c = new CfOptimizer.Candidate(ip);
+                    c.mbps = -2;    // -2 = 正在测速
+                    liveSpeed.add(c);
+                    liveLast = ip + "  →  测速中…";
+                }
+                scheduleLiveRender();
+            }
+
+            @Override public void onSpeedMeasured(String ip, double mbps) {
+                synchronized (liveLock) {
+                    liveDone++;
+                    for (int i = 0; i < liveSpeed.size(); i++) {
+                        if (liveSpeed.get(i).ip.equals(ip)) { liveSpeed.get(i).mbps = mbps; break; }
+                    }
+                    liveLast = ip + (mbps > 0 ? String.format("  →  %.1f Mbps", mbps) : "  →  测速失败");
+                }
+                scheduleLiveRender();
+            }
+        });
 
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
                     final List<CfOptimizer.Candidate> result = opt.optimize(new CfOptimizer.Progress() {
                         @Override public void onProgress(final String phase, final int done, final int total, final String detail) {
+                            // 工作线程：先记过程数据（界面按 110ms 限流重绘），再更新顶部进度
+                            synchronized (liveLock) {
+                                liveTotal = total;
+                                if (!"done".equals(phase)) setLivePhase(phase);
+                            }
+                            scheduleLiveRender();
                             runOnUiThread(new Runnable() {
                                 @Override public void run() {
                                     String label = phase.equals("sample") ? "采样网段" :
@@ -1356,6 +1831,7 @@ public class MainActivity extends Activity {
                         @Override public void run() {
                             cfResults.clear();
                             cfResults.addAll(result);
+                            showCfResults();
                             if (cfList != null) cfList.resetList();
                             if (tvCfPhase != null) tvCfPhase.setText(result.isEmpty() ? "没有可用结果" : "优选完成");
                             if (tvCfPct != null) tvCfPct.setText(result.size() + " 个可用");
@@ -1368,6 +1844,7 @@ public class MainActivity extends Activity {
                 } catch (final InterruptedException e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
+                            showCfResults();
                             if (tvCfPhase != null) tvCfPhase.setText("已取消");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("已取消优选，已完成的进度不会写入 hosts。");
@@ -1376,6 +1853,7 @@ public class MainActivity extends Activity {
                 } catch (final Exception e) {
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
+                            showCfResults();
                             if (tvCfPhase != null) tvCfPhase.setText("优选失败");
                             if (tvCfPct != null) tvCfPct.setText("—");
                             tvCfProgress.setText("失败原因：" + e);
@@ -1393,6 +1871,145 @@ public class MainActivity extends Activity {
                 }
             }
         }, "cf-optimize").start();
+    }
+
+    // ==================== CF 实时面板的渲染 ====================
+
+    /** 切阶段：只有真的换了阶段才清表，避免误清掉正在累积的数据 */
+    private void setLivePhase(String phase) {
+        synchronized (liveLock) {
+            if (phase.equals(livePhase)) return;
+            livePhase = phase;
+            if ("latency".equals(phase) || "speed".equals(phase) || "sample".equals(phase)) {
+                liveLat.clear();
+                liveSpeed.clear();
+                liveDone = 0;
+                liveLast = "";
+            }
+        }
+    }
+
+    /** 跑完/取消/失败：把实时面板收起来，让结果列表接管这块区域 */
+    private void showCfResults() {
+        if (cfLive != null) cfLive.setVisibility(View.GONE);
+        if (cfList != null) cfList.setVisibility(View.VISIBLE);
+    }
+
+    /** 过程回调密度很高（320 个 IP），限流到约 9 fps，避免盒子卡在重绘上 */
+    private void scheduleLiveRender() {
+        if (liveRenderQueued) return;
+        liveRenderQueued = true;
+        ui.postDelayed(liveRenderTask, 110);
+    }
+
+    private static String pad2(int n) {
+        return n < 10 ? "0" + n : String.valueOf(n);
+    }
+
+    private void renderLiveBoard() {
+        if (cfLive == null || cfLive.getVisibility() != View.VISIBLE) return;
+        String phase;
+        int done, total;
+        String last;
+        List<CfOptimizer.Candidate> lat = null, sp = null;
+        synchronized (liveLock) {
+            phase = livePhase;
+            done = liveDone;
+            total = liveTotal;
+            last = liveLast;
+            if ("latency".equals(phase)) lat = new ArrayList<CfOptimizer.Candidate>(liveLat);
+            else if ("speed".equals(phase)) sp = new ArrayList<CfOptimizer.Candidate>(liveSpeed);
+        }
+
+        if (lat != null) {
+            Collections.sort(lat, new java.util.Comparator<CfOptimizer.Candidate>() {
+                @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
+                    return Integer.compare(a.rttMs, b.rttMs);
+                }
+            });
+            cfLiveTitle.setText("实时测试 · 延迟");
+            cfLiveStat.setText((total > 0 ? "已测 " + done + " / " + total + "   ·   " : "")
+                    + "通 " + lat.size() + "   ·   不通 " + Math.max(0, done - lat.size()));
+            for (int i = 0; i < liveRows.size(); i++) {
+                LiveRow r = liveRows.get(i);
+                if (i < lat.size()) {
+                    CfOptimizer.Candidate c = lat.get(i);
+                    // 三重编码：数字 + 颜色 + 条长，别让用户只靠颜色判断好坏
+                    int color = c.rttMs <= 80 ? COLOR_OK
+                            : c.rttMs <= 180 ? COLOR_ACCENT : COLOR_HINT;
+                    r.rank.setText(pad2(i + 1));
+                    r.rank.setTextColor(i < 3 ? COLOR_ACCENT : COLOR_HINT);
+                    r.ip.setText(c.ip);
+                    r.ip.setTextColor(COLOR_TEXT);
+                    r.metric.setText(c.rttMs + " ms");
+                    r.metric.setTextColor(color);
+                    r.bar.setFillColor(color);
+                    r.bar.setProgress(Math.max(0.05f, 1f - Math.min(1f, c.rttMs / 400f)));
+                } else {
+                    blankLiveRow(r);
+                }
+            }
+            cfLiveFoot.setText(last.isEmpty()
+                    ? "正在并发测试 443 端口，结果会逐条落在这张表里"
+                    : "刚刚    " + last);
+        } else if (sp != null) {
+            Collections.sort(sp, new java.util.Comparator<CfOptimizer.Candidate>() {
+                @Override public int compare(CfOptimizer.Candidate a, CfOptimizer.Candidate b) {
+                    return Double.compare(sortKey(b.mbps), sortKey(a.mbps));
+                }
+                /** 实测值按大小排；"测速中"(-2) 排在有结果之后，失败(-1) 垫底 */
+                private double sortKey(double v) { return v == -2 ? -0.5 : v; }
+            });
+            double fastest = 0;
+            for (CfOptimizer.Candidate c : sp) if (c.mbps > fastest) fastest = c.mbps;
+            cfLiveTitle.setText("实时测试 · 下载速度");
+            cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
+                    + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
+            for (int i = 0; i < liveRows.size(); i++) {
+                LiveRow r = liveRows.get(i);
+                if (i < sp.size()) {
+                    CfOptimizer.Candidate c = sp.get(i);
+                    r.rank.setText(pad2(i + 1));
+                    r.rank.setTextColor(i < 3 ? COLOR_ACCENT : COLOR_HINT);
+                    r.ip.setText(c.ip);
+                    r.ip.setTextColor(COLOR_TEXT);
+                    if (c.mbps == -2) {
+                        r.metric.setText("测速中…");
+                        r.metric.setTextColor(COLOR_HINT);
+                        r.bar.setFillColor(COLOR_HINT);
+                        r.bar.setProgress(0f);
+                    } else if (c.mbps > 0) {
+                        r.metric.setText(String.format("%.1f Mbps", c.mbps));
+                        r.metric.setTextColor(COLOR_OK);
+                        r.bar.setFillColor(COLOR_OK);
+                        r.bar.setProgress(Math.min(1f, (float) (c.mbps / 40f)));
+                    } else {
+                        r.metric.setText("失败");
+                        r.metric.setTextColor(COLOR_HINT);
+                        r.bar.setFillColor(COLOR_HINT);
+                        r.bar.setProgress(0f);
+                    }
+                } else {
+                    blankLiveRow(r);
+                }
+            }
+            cfLiveFoot.setText(last.isEmpty() ? "同时测 8 个 IP，结果逐条落在这张表里"
+                    : "同时测 8 个    ·    刚刚 " + last);
+        } else {
+            cfLiveTitle.setText("实时测试 · 采样");
+            cfLiveStat.setText("");
+            for (LiveRow r : liveRows) blankLiveRow(r);
+            cfLiveFoot.setText("从 Cloudflare 官方网段按大小加权随机取点…");
+        }
+    }
+
+    private void blankLiveRow(LiveRow r) {
+        r.rank.setText("–");
+        r.rank.setTextColor(COLOR_HINT);
+        r.ip.setText("");
+        r.metric.setText("");
+        r.bar.setProgress(0f);
+        r.bar.setFillColor(COLOR_HINT);
     }
 
     /**

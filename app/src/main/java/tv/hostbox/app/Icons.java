@@ -36,6 +36,7 @@ public final class Icons {
     public static final String DOT = "dot";
     public static final String WIFI = "wifi";
     public static final String PENCIL = "pencil";
+    public static final String DOWNLOAD = "download";
 
     /** @param sizeDp 图标视觉尺寸（dp）；@param color ARGB 颜色 */
     public static Drawable drawable(Context c, String kind, int sizeDp, int color) {
@@ -148,6 +149,14 @@ public final class Icons {
             path.lineTo(9.8f, 17.6f);
             path.close();
             cv.drawPath(path, p);
+        } else if (DOWNLOAD.equals(kind)) {
+            // 升级：向下箭头 + 落地托盘，比"刷新"更能表达"取新版"
+            cv.drawLine(12, 3.4f, 12, 14.4f, p);
+            path.moveTo(7.4f, 10.2f);
+            path.lineTo(12, 14.8f);
+            path.lineTo(16.6f, 10.2f);
+            cv.drawPath(path, p);
+            cv.drawLine(4.2f, 20.2f, 19.8f, 20.2f, p);
         }
         return new BitmapDrawable(c.getResources(), bmp);
     }
