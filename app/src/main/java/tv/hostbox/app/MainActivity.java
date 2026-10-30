@@ -826,7 +826,14 @@ public class MainActivity extends Activity {
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(24), dp(4), dp(24), 0);
+        box.setPadding(us(36), us(6), us(36), us(20));
+
+        // 7 个设置项在电视上一屏放不下：弹窗高度按屏幕比例限死，内容自己滚，
+        // 否则底部行和「关闭」会被压出屏幕（真机截图上就是这么糊掉的）
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(box, new android.widget.ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         settingsSection(box, "外观", true);
         View first = settingRow(box, "主题", th.name, new View.OnClickListener() {
@@ -882,14 +889,19 @@ public class MainActivity extends Activity {
 
         AlertDialog dlg = newDialog()
                 .setTitle("设置")
-                .setView(box)
+                .setView(scroll)
                 .setNegativeButton("关闭", null)
                 .create();
         styleDialog(dlg);
         dlg.show();
-        // 系统默认弹窗在电视上只有半屏宽，设置行左右两侧的"标签 / 当前值"会被挤到一起
+        // 尺寸完全跟屏走：宽 78%、高 90%——电视上够大气，手机上就是常规全宽弹窗，
+        // 换任何分辨率/密度都不用再调。tv 720dp 高 → 宽约 998dp；手机 640dp 高 → 约全屏宽的 78%
         android.view.Window w = dlg.getWindow();
-        if (w != null) w.setLayout(dp(640), ViewGroup.LayoutParams.WRAP_CONTENT);
+        if (w != null) {
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            w.setLayout(Math.round(dm.widthPixels * 0.78f),
+                    Math.round(dm.heightPixels * 0.90f));
+        }
         // 初焦点给第一行设置项，而不是底部的「关闭」按钮
         if (first != null) first.post(new Runnable() {
             @Override public void run() { if (first != null) first.requestFocus(); }
@@ -899,11 +911,12 @@ public class MainActivity extends Activity {
     /** 设置弹窗里的分区标题：小字号强调色，把 7 个设置项拆成三组好扫读 */
     private void settingsSection(LinearLayout box, String title, boolean first) {
         TextView tv = new TextView(this);
-        styleText(tv, COLOR_ACCENT, 12);
+        styleText(tv, COLOR_ACCENT, Math.round(13 * uiScale()));
         tv.setText(title);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = first ? dp(6) : dp(16);
+        lp.topMargin = first ? us(8) : us(22);
+        lp.bottomMargin = us(2);
         box.addView(tv, lp);
     }
 
@@ -915,32 +928,37 @@ public class MainActivity extends Activity {
     private View settingRow(LinearLayout box, String label, String value,
                             View.OnClickListener onClick) {
         final TextView tvLabel = new TextView(this);
-        styleText(tvLabel, COLOR_TEXT, 16);
+        styleText(tvLabel, COLOR_TEXT, Math.round(17 * uiScale()));
         tvLabel.setText(label);
 
         final TextView tvValue = new TextView(this);
-        styleText(tvValue, COLOR_HINT, 14);
+        styleText(tvValue, COLOR_HINT, Math.round(15 * uiScale()));
         tvValue.setText(value);
         tvValue.setGravity(Gravity.END);
+        tvValue.setSingleLine(true);
 
         final TextView chev = new TextView(this);
-        styleText(chev, COLOR_ACCENT, 16);
+        styleText(chev, COLOR_ACCENT, Math.round(18 * uiScale()));
         chev.setText("›");
         chev.setGravity(Gravity.CENTER);
+        chev.setPadding(us(10), 0, 0, 0);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(52));
+        row.setMinimumHeight(us(62));
+        row.setPadding(us(20), 0, us(20), 0);
         row.setBackground(Skin.button(th));
         row.setFocusable(true);
+        // 移动端适配预留：这行本来就是可点击的（setOnClickListener），触摸设备
+        // 不走焦点高亮也能正常操作；到时只需在无触摸屏的盒子上隐藏触摸提示即可
         row.setFocusableInTouchMode(false);
         row.setOnClickListener(onClick);
         row.addView(tvLabel, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         LinearLayout.LayoutParams lpV = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lpV.setMargins(dp(12), 0, dp(8), 0);
+        lpV.setMargins(us(16), 0, us(4), 0);
         row.addView(tvValue, lpV);
         row.addView(chev, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -955,7 +973,7 @@ public class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
+        lp.topMargin = us(10);
         box.addView(row, lp);
         return row;
     }
@@ -2637,6 +2655,22 @@ public class MainActivity extends Activity {
     private int dp(int v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
                 v, getResources().getDisplayMetrics());
+    }
+
+    /**
+     * 自适应比例：以 720dp 屏高（标准 1080p 电视）为基准 1.0。
+     * 手机/平板屏高更小、平板更大，同一套代码的弹窗、行高、字号都会随之缩放，
+     * 不用为每种设备写一套尺寸。后续适配移动端时直接复用这套比例即可。
+     */
+    private float uiScale() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        float hdp = dm.heightPixels / dm.density;
+        return Math.max(0.62f, Math.min(1.2f, hdp / 720f));
+    }
+
+    /** 按自适应比例取尺寸：弹窗、设置行这类"整块 UI"用它，避免在不同屏上写死 dp */
+    private int us(float v) {
+        return dp(Math.round(v * uiScale()));
     }
 
     private String getBoxIp() {
