@@ -1,16 +1,22 @@
 package tv.hostbox.app;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * /system/etc/hosts 的读取 / 修改（需 root）。
@@ -28,6 +34,18 @@ public final class HostsManager {
     /** 备份保留数量的 SharedPreferences key；0 = 不限制 */
     public static final String PREF_MAX_BACKUPS = "maxBackups";
     public static final int DEFAULT_MAX_BACKUPS = 20;
+    /** 备份序号计数：单调递增，删掉旧的也不回收（v3 删了，下一个还是 v8） */
+    private static final String PREF_BACKUP_SEQ = "backupSeq";
+    /** 用户给某份备份起的名字（key = 本前缀 + 文件名），只改显示，不动文件 */
+    private static final String PREF_BACKUP_LABEL = "blabel.";
+    /** 用户名字最多几个字：电视上一行要放得下 */
+    private static final int LABEL_MAX = 24;
+    /** 恢复前的自动备份，名字上挂的标记 */
+    private static final String BEFORE_RESTORE = ".before_restore";
+    private static final Object SEQ_LOCK = new Object();
+    /** 拿不到 prefs 时的序号兜底（保证同一秒也不会生成两个同名文件） */
+    private static final java.util.concurrent.atomic.AtomicInteger SEQ_FALLBACK =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     public static class Entry {
         public String ip;
@@ -45,6 +63,34 @@ public final class HostsManager {
         @Override
         public String toString() {
             return host + " → " + ip;
+        }
+    }
+
+    // ==================== 备份 ====================
+
+    /**
+     * 一份备份。
+     *
+     * 名字分两套：
+     *  - 文件名 hosts.bak.v7.20261101_173221：只含 ASCII 安全字符，因为要进 root 命令；
+     *  - 显示名（label）：用户随便起，中文也行，存在 prefs 里，绝不进命令。
+     * 之前只有时间戳，恢复前自动备份一堆下来全是 17:49 / 17:49 / 17:54，
+     * 谁是谁根本分不出，所以加了 v 序号和条数。
+     */
+    public static class Backup {
+        public final String name;      // 文件名
+        public final int entries;      // 里面有几条；-1 = 没读到
+        public final int seq;          // v 序号；0 = 老备份（没有序号）
+        public final long timeMs;      // 备份时间；0 = 名字里认不出来
+        public final boolean beforeRestore;
+        public String label;           // 用户起的名，null = 没起
+
+        Backup(String name, int entries) {
+            this.name = name;
+            this.entries = entries;
+            this.seq = parseSeq(name);
+            this.timeMs = parseTimeMs(name);
+            this.beforeRestore = name.endsWith(BEFORE_RESTORE);
         }
     }
 
@@ -181,9 +227,10 @@ public final class HostsManager {
             fos.close();
 
             // 2. 备份 + remount + 覆盖 + 校验
+            String bak = newBackupName(System.currentTimeMillis(), false);
             String script =
                 "mkdir -p " + BACKUP_DIR + "\n" +
-                "cp -f " + HOSTS_PATH + " " + BACKUP_DIR + "/hosts.bak.$(date +%Y%m%d_%H%M%S)\n" +
+                "cp -f " + HOSTS_PATH + " \"" + BACKUP_DIR + "/" + bak + "\"\n" +
                 "mount -o rw,remount /system 2>/dev/null\n" +
                 "mount -o rw,remount / 2>/dev/null\n" +
                 "cp -f " + tmp.getAbsolutePath() + " " + HOSTS_PATH + "\n" +
@@ -349,15 +396,137 @@ public final class HostsManager {
         return sb.toString();
     }
 
-    /** 列出 /sdcard/hostbox 下的备份文件名 */
-    public static List<String> listBackups() {
-        RootShell.Result r = RootShell.run("ls -1 " + BACKUP_DIR + " 2>/dev/null");
-        List<String> out = new ArrayList<String>();
+    /**
+     * 列出备份（新→旧），顺带读出每份里有几条。
+     *
+     * 一条命令取回全部：`ls -1t` 让 shell 那边先按时间排好，回来再用名字里的时间戳复核——
+     * 文件被拷来拷去会改 mtime，光靠 ls -t 会把老备份排到前面去。
+     * 条数用 grep -cvE 数「非注释非空行」。
+     * 注意 toybox 的 grep 在 -v + 多个 -e 时只对第一个模式取反：`-cve '^#' -e '^$'`
+     * 会把空行也算进去（实测 10 行的文件数出 10），必须把两个条件合成一个 ERE 模式。
+     */
+    public static List<Backup> listBackupsDetail() {
+        List<Backup> out = new ArrayList<Backup>();
+        String script =
+            "cd " + BACKUP_DIR + " 2>/dev/null\n" +
+            "ls -1t | grep '^hosts\\.bak\\.' | while read f; do\n" +
+            "  echo \"BK|$f|$(grep -cvE '^(#|$)' \\\"$f\\\")\"\n" +
+            "done\n";
+        RootShell.Result r = RootShell.run(script);
         for (String line : r.output.split("\n")) {
-            String n = line.trim();
-            if (isSafeBackupName(n)) out.add(n);
+            String t = line.trim();
+            if (!t.startsWith("BK|")) continue;
+            String[] p = t.split("\\|");
+            if (p.length < 2) continue;
+            String name = p[1];
+            if (!isSafeBackupName(name)) continue;
+            int n = -1;
+            if (p.length >= 3) {
+                try { n = Integer.parseInt(p[2].trim()); } catch (Exception ignored) {}
+            }
+            out.add(new Backup(name, n));
         }
+        try {
+            SharedPreferences sp = prefs();
+            for (int i = 0; i < out.size(); i++) {
+                Backup b = out.get(i);
+                String l = sp.getString(PREF_BACKUP_LABEL + b.name, null);
+                if (l != null && !l.isEmpty()) b.label = l;
+            }
+        } catch (Exception ignored) {}   // 拿不到 prefs 就只是没显示名
+        sortBackups(out);
         return out;
+    }
+
+    /**
+     * 排序（新→旧）：先按名字里的时间戳，认不出时间的排最后，再按 v 序号兜底。
+     *
+     * 不能按文件名排——v10 会排到 v9 前面（字符串比较）；
+     * 也不能只按 ls -t——mtime 会被文件拷贝改写。
+     */
+    static void sortBackups(List<Backup> list) {
+        Collections.sort(list, new Comparator<Backup>() {
+            @Override public int compare(Backup a, Backup b) {
+                if (a.timeMs != b.timeMs) return a.timeMs > b.timeMs ? -1 : 1;
+                if (a.seq != b.seq) return b.seq - a.seq;
+                return b.name.compareTo(a.name);
+            }
+        });
+    }
+
+    /** 从名字里取 v 序号：hosts.bak.v7.20261101_173221 → 7；老备份没有 → 0 */
+    static int parseSeq(String name) {
+        if (name == null) return 0;
+        Matcher m = Pattern.compile("\\.v(\\d+)\\.").matcher(name);
+        if (!m.find()) return 0;
+        try { return Integer.parseInt(m.group(1)); } catch (Exception e) { return 0; }
+    }
+
+    /** 从名字里取时间（毫秒）：…20261101_173221… → 毫秒；认不出 → 0 */
+    static long parseTimeMs(String name) {
+        if (name == null) return 0;
+        Matcher m = Pattern.compile("(\\d{8})_(\\d{6})").matcher(name);
+        if (!m.find()) return 0;
+        try {
+            return new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).parse(m.group(0)).getTime();
+        } catch (ParseException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * 生成一个新备份名：hosts.bak.v7.20261101_173221
+     * （恢复前自动备份再挂 .before_restore）。
+     *
+     * 序号单调递增且不回收：删掉 v3 之后下一个仍是 v8，不会把别的备份挤成 v3——
+     * 那样用户会说"我明明记的是 v3，怎么变成另一个了"。
+     * 时间戳在 Java 里生成、名字直接拼进命令，shell 里从此不再有 $(date) 这类命令替换。
+     */
+    static String newBackupName(long nowMs, boolean beforeRestore) {
+        int seq;
+        synchronized (SEQ_LOCK) {
+            try {
+                SharedPreferences sp = prefs();
+                seq = sp.getInt(PREF_BACKUP_SEQ, 0) + 1;
+                sp.edit().putInt(PREF_BACKUP_SEQ, seq).apply();
+            } catch (Exception e) {
+                // 拿不到 prefs 时用进程内计数器兜底：宁可序号和上次对不上，
+                // 也不能同秒生成两个同名文件——那会直接把上一份备份覆盖掉
+                seq = SEQ_FALLBACK.incrementAndGet();
+            }
+        }
+        return "hosts.bak." + (seq > 0 ? "v" + seq + "." : "")
+                + stamp(nowMs) + (beforeRestore ? BEFORE_RESTORE : "");
+    }
+
+    private static String stamp(long nowMs) {
+        return new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date(nowMs));
+    }
+
+    /**
+     * 列表里显示的那一整行：  v7 · 改 emby 前 · 11-01 17:32 · 3 条（恢复前自动备份）
+     *
+     * 序号让用户能口述"恢复到 v5 那次"；条数让一堆恢复前备份彼此分得开
+     * （同一个下午连着恢复 5 次，光看时间分不出，看 11 条 / 7 条 / 3 条 一眼就知道）。
+     */
+    public static String backupLabelText(Backup b) {
+        StringBuilder sb = new StringBuilder();
+        if (b.seq > 0) sb.append("v").append(b.seq);
+        if (b.label != null) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(b.label);
+        }
+        if (b.timeMs > 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(new SimpleDateFormat("MM-dd HH:mm", Locale.US).format(new Date(b.timeMs)));
+        }
+        if (b.entries >= 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append(b.entries).append(" 条");
+        }
+        if (b.beforeRestore) sb.append("   （恢复前自动备份）");
+        if (sb.length() == 0) sb.append(b.name);   // 什么都不认识就直接给文件名
+        return sb.toString();
     }
 
     /**
@@ -380,31 +549,125 @@ public final class HostsManager {
     }
 
     /**
+     * 删除一份备份。
+     * 名字先过白名单再进命令——它要拼进 root 命令，用户起的显示名再花哨也不参与。
+     */
+    public static String deleteBackup(String name) {
+        if (!isSafeBackupName(name)) return "备份名不合法：" + name;
+        removeLabel(name);
+        RootShell.Result r = RootShell.run("rm -f \"" + BACKUP_DIR + "/" + name + "\"\n");
+        return r.ok ? null : "删除失败：" + r.output;
+    }
+
+    /** 清空全部备份（连用户起的名字一起清） */
+    public static String clearBackups() {
+        // 用通配符而不是逐个拼名字：文件名由 shell 展开，天然不掺任何外来输入
+        RootShell.Result r = RootShell.run(
+            "cd " + BACKUP_DIR + " 2>/dev/null\nrm -f hosts.bak.*\n");
+        if (!r.ok) return "清空失败：" + r.output;
+        clearAllLabels();
+        return null;
+    }
+
+    /**
+     * 给备份起个好认的名字：只改显示，文件名一个字都不动。
+     *
+     * 显示名允许中文、空格、emoji，因为它只进 prefs 和界面，永远不进 root 命令；
+     * 文件名则永远是 ASCII 白名单内的字符。两者分开，用户起名才不必被安全规则卡住。
+     */
+    public static String renameBackup(String name, String rawLabel) {
+        if (!isSafeBackupName(name)) return "备份名不合法：" + name;
+        String label = cleanLabel(rawLabel);
+        try {
+            SharedPreferences.Editor ed = prefs().edit();
+            if (label.isEmpty()) ed.remove(PREF_BACKUP_LABEL + name);
+            else ed.putString(PREF_BACKUP_LABEL + name, label);
+            ed.apply();
+        } catch (Exception e) {
+            return "改名失败：" + e;
+        }
+        return null;
+    }
+
+    /** 用户起的显示名净化：压成一行、去控制字符、限长（电视上一行要放得下） */
+    static String cleanLabel(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            if (c < 0x20 || c == 0x7f) continue;
+            sb.append(c);
+            if (sb.length() >= LABEL_MAX * 2) break;   // 中文二字算一字，先多收点再裁
+        }
+        String t = sb.toString().trim().replaceAll(" {2,}", " ");
+        // 按字符数截断（emoji  surrogate pair 也不会被切坏，因为按码点递推）
+        int count = 0, end = 0;
+        for (int i = 0; i < t.length(); ) {
+            int cp = t.codePointAt(i);
+            if (count + 1 > LABEL_MAX) break;
+            count++;
+            end = i + Character.charCount(cp);
+            i = end;
+        }
+        return t.substring(0, end).trim();
+    }
+
+    /** 取用户给这份备份起的名字（没起过则空串） */
+    public static String backupLabelOf(String name) {
+        try {
+            String l = prefs().getString(PREF_BACKUP_LABEL + name, null);
+            return l == null ? "" : l;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static void removeLabel(String name) {
+        try { prefs().edit().remove(PREF_BACKUP_LABEL + name).apply(); }
+        catch (Exception ignored) {}
+    }
+
+    /** 清掉所有显示名，免得备份删光了 prefs 还留一堆孤儿 key */
+    private static void clearAllLabels() {
+        try {
+            SharedPreferences sp = prefs();
+            SharedPreferences.Editor ed = sp.edit();
+            java.util.Map<String, ?> all = sp.getAll();
+            for (String k : all.keySet()) {
+                if (k.startsWith(PREF_BACKUP_LABEL)) ed.remove(k);
+            }
+            ed.apply();
+        } catch (Exception ignored) {}
+    }
+
+    /**
      * 按用户设置（PREF_MAX_BACKUPS，0=不限制）清理多余备份，保留最新的 N 份。
-     * 内部方法，writeRaw 成功后调用；失败静默（不影响写入结果）。
+     * 内部方法，writeRaw / restoreBackup 成功后调用；失败静默（不影响主流程）。
      */
     private static void cleanupBackups() {
         try {
-            int keep = AppContextHolder.get()
-                    .getSharedPreferences("hostbox", Context.MODE_PRIVATE)
-                    .getInt(PREF_MAX_BACKUPS, DEFAULT_MAX_BACKUPS);
+            int keep = prefs().getInt(PREF_MAX_BACKUPS, DEFAULT_MAX_BACKUPS);
             if (keep <= 0) return; // 不限制
-            // ls -t 按修改时间新→旧排列，跳过前 keep 个，其余删除
-            String script =
-                "cd " + BACKUP_DIR + " 2>/dev/null\n" +
-                "ls -t | grep '^hosts\\.bak\\.' | tail -n +" + (keep + 1) +
-                " | while read f; do rm -f \"$f\"; done\n" +
-                "echo CLEAN_RC=$?\n";
-            RootShell.run(script);
+            List<Backup> all = listBackupsDetail();
+            if (all.size() <= keep) return;
+            // 按名字逐个删：名字都过过白名单，比在 shell 里拼 tail -n +N 更靠得住
+            StringBuilder sb = new StringBuilder("cd " + BACKUP_DIR + " 2>/dev/null\n");
+            for (int i = keep; i < all.size(); i++) {
+                sb.append("rm -f \"").append(all.get(i).name).append("\"\n");
+            }
+            RootShell.run(sb.toString());
+            for (int i = keep; i < all.size(); i++) removeLabel(all.get(i).name);
         } catch (Exception ignored) {}
     }
 
     /** 恢复指定备份文件（恢复前先把当前 hosts 也备份一份，防误恢复无法回退） */
     public static String restoreBackup(String name) {
         if (!isSafeBackupName(name)) return "备份名不合法：" + name;
+        String bak = newBackupName(System.currentTimeMillis(), true);
         String script =
             "mkdir -p " + BACKUP_DIR + "\n" +
-            "cp -f " + HOSTS_PATH + " " + BACKUP_DIR + "/hosts.bak.$(date +%Y%m%d_%H%M%S)_before_restore\n" +
+            "cp -f " + HOSTS_PATH + " \"" + BACKUP_DIR + "/" + bak + "\"\n" +
             "mount -o rw,remount /system 2>/dev/null\n" +
             "mount -o rw,remount / 2>/dev/null\n" +
             "cp -f \"" + BACKUP_DIR + "/" + name + "\" " + HOSTS_PATH + "\n" +
@@ -416,6 +679,10 @@ public final class HostsManager {
             return null;
         }
         return "恢复失败：" + r.output;
+    }
+
+    private static SharedPreferences prefs() {
+        return AppContextHolder.get().getSharedPreferences("hostbox", Context.MODE_PRIVATE);
     }
 
     public static String now() {

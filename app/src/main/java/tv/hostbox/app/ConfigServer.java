@@ -209,6 +209,44 @@ public final class ConfigServer {
                 } else {
                     respond(s, 500, "text/plain; charset=utf-8", err);
                 }
+            } else if ("GET".equals(method) && "/api/backups".equals(path)) {
+                respond(s, 200, "application/json; charset=utf-8", buildBackupsJson());
+            } else if ("POST".equals(method) && "/api/backup/restore".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String name = f.get("name");
+                String err = name == null ? "缺少 name" : HostsManager.restoreBackup(name.trim());
+                if (err == null) {
+                    respond(s, 200, "text/plain; charset=utf-8", "已恢复");
+                    notifyDataChanged();
+                } else {
+                    respond(s, 500, "text/plain; charset=utf-8", err);
+                }
+            } else if ("POST".equals(method) && "/api/backup/rename".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String name = f.get("name");
+                // 名字是用户随手起的（中文、空格都允许），只进 prefs，不进任何 root 命令
+                String label = f.get("label");
+                if (name == null) {
+                    respond(s, 400, "text/plain; charset=utf-8", "缺少 name");
+                    return;
+                }
+                String err = HostsManager.renameBackup(name.trim(), label);
+                if (err == null) respond(s, 200, "text/plain; charset=utf-8", "已改名");
+                else respond(s, 500, "text/plain; charset=utf-8", err);
+            } else if ("POST".equals(method) && "/api/backup/delete".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String name = f.get("name");
+                if (name == null) {
+                    respond(s, 400, "text/plain; charset=utf-8", "缺少 name");
+                    return;
+                }
+                String err = HostsManager.deleteBackup(name.trim());
+                if (err == null) respond(s, 200, "text/plain; charset=utf-8", "已删除");
+                else respond(s, 500, "text/plain; charset=utf-8", err);
+            } else if ("POST".equals(method) && "/api/backup/clear".equals(path)) {
+                String err = HostsManager.clearBackups();
+                if (err == null) respond(s, 200, "text/plain; charset=utf-8", "已清空");
+                else respond(s, 500, "text/plain; charset=utf-8", err);
             } else {
                 respond(s, 404, "text/plain; charset=utf-8", "not found");
             }
@@ -271,6 +309,30 @@ public final class ConfigServer {
               .append(jsonEscape(String.valueOf(e.getMessage()))).append('"');
         }
         sb.append('}');
+        return sb.toString();
+    }
+
+    /** 备份列表（新→旧）：显示文案在盒子这边排版好，手机和电视两边说法一致 */
+    private static String buildBackupsJson() {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append('[');
+        try {
+            List<HostsManager.Backup> list = HostsManager.listBackupsDetail();
+            for (int i = 0; i < list.size(); i++) {
+                HostsManager.Backup b = list.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"name\":\"").append(jsonEscape(b.name)).append('"')
+                  .append(",\"text\":\"").append(jsonEscape(HostsManager.backupLabelText(b))).append('"')
+                  .append(",\"label\":\"").append(jsonEscape(b.label == null ? "" : b.label)).append('"')
+                  .append(",\"entries\":").append(b.entries)
+                  .append(",\"seq\":").append(b.seq)
+                  .append(",\"before\":").append(b.beforeRestore)
+                  .append('}');
+            }
+        } catch (Exception e) {
+            // 读不到就返回空数组，页面会显示"还没有备份"
+        }
+        sb.append(']');
         return sb.toString();
     }
 

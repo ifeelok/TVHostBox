@@ -96,6 +96,17 @@
     cursor:pointer;transition:background .15s;
   }
   .del:active{background:rgba(239,83,80,.28)}
+  /* 备份行：右侧三个小按钮（恢复 / 改名 / 删除） */
+  .acts{display:flex;gap:6px;flex:none}
+  .act{
+    height:34px;padding:0 11px;border-radius:9px;
+    background:rgba(79,195,247,.10);border:1px solid rgba(79,195,247,.22);
+    color:var(--accent);font-size:13px;line-height:1;
+  }
+  .act:active{background:rgba(79,195,247,.26)}
+  .act.warn{background:rgba(239,83,80,.10);border-color:rgba(239,83,80,.24);color:var(--danger)}
+  .act.warn:active{background:rgba(239,83,80,.28)}
+  button.ghost.danger{color:var(--danger);border-color:rgba(239,83,80,.32)}
   .empty{
     text-align:center;color:var(--sub);font-size:13px;
     padding:22px 8px;line-height:1.8;
@@ -237,6 +248,19 @@
     <button class="primary" id="save">保存到盒子</button>
   </section>
 
+  <section class="card">
+    <div class="card-head">
+      <h2>备份</h2>
+      <span class="count" id="bkCount">0 个</span>
+    </div>
+    <ul class="list" id="bkList"><li class="empty">读取中…</li></ul>
+    <div class="row">
+      <button class="ghost" id="bkReload">刷新</button>
+      <button class="ghost danger" id="bkClear">清空全部</button>
+    </div>
+    <p class="hint">改 hosts 前会自动存一份；恢复前会先把当前 hosts 再存一份，不会越恢复越少</p>
+  </section>
+
   <details class="card" id="adv">
     <summary>高级 · 全文编辑</summary>
     <div class="body">
@@ -250,7 +274,7 @@
   </details>
 </main>
 
-<footer>写入后自动备份到 /sdcard/hostbox<br>可在电视端「备份列表」回滚到任意历史版本</footer>
+<footer>写入后自动备份到 /sdcard/hostbox<br>名字里的 v 序号是递增的，删掉别的也不会重排</footer>
 
 <div id="toast"></div>
 
@@ -258,6 +282,7 @@
 (function(){
   var $ = function(s){ return document.querySelector(s); };
   var entries = [];
+  var backups = [];
   var activeHost = null;
   var rawLoaded = false;
   var toastTimer = null;
@@ -364,6 +389,71 @@
     });
   }
 
+  // ---------- 备份 ----------
+  function renderBackups(){
+    var ul = $('#bkList');
+    ul.innerHTML = '';
+    $('#bkCount').textContent = backups.length + ' 个';
+    $('#bkClear').disabled = !backups.length;
+
+    if (!backups.length){
+      var e = el('li', 'empty', '还没有备份\n改一次 hosts 就会自动存一份');
+      e.style.whiteSpace = 'pre-line';
+      ul.appendChild(e);
+      return;
+    }
+
+    backups.forEach(function(b){
+      var li = el('li', 'item');
+      var meta = el('div', 'meta');
+      meta.appendChild(el('div', 'host', b.text));
+      li.appendChild(meta);
+
+      var acts = el('div', 'acts');
+
+      var restore = el('button', 'act', '恢复');
+      restore.addEventListener('click', function(){
+        if (!confirm('恢复到这份备份？\n' + b.text + '\n\n当前 hosts 会先自动备份一份')) return;
+        post('/api/backup/restore', 'name=' + encodeURIComponent(b.name))
+          .then(function(){ toast('已恢复 ' + b.text); refresh(); })
+          .catch(function(m){ toast(m.message || m, false); });
+      });
+      acts.appendChild(restore);
+
+      var rename = el('button', 'act', '改名');
+      rename.addEventListener('click', function(){
+        var v = prompt('给这份备份起个名字\n（例：改 emby 前 / 加了奈飞）', b.label || '');
+        if (v === null) return;
+        post('/api/backup/rename',
+             'name=' + encodeURIComponent(b.name) + '&label=' + encodeURIComponent(v))
+          .then(function(){ toast('已改名'); loadBackups(); })
+          .catch(function(m){ toast(m.message || m, false); });
+      });
+      acts.appendChild(rename);
+
+      var del = el('button', 'act warn', '✕');
+      del.setAttribute('aria-label', '删除备份 ' + b.text);
+      del.addEventListener('click', function(){
+        if (!confirm('删除这份备份？\n' + b.text + '\n\n只删备份，不影响当前 hosts')) return;
+        post('/api/backup/delete', 'name=' + encodeURIComponent(b.name))
+          .then(function(){ toast('已删除 ' + b.text); loadBackups(); })
+          .catch(function(m){ toast(m.message || m, false); });
+      });
+      acts.appendChild(del);
+
+      li.appendChild(acts);
+      ul.appendChild(li);
+    });
+  }
+
+  /** 单独刷备份：改名/删除不会动当前 hosts，没必要整页刷新 */
+  function loadBackups(){
+    return fetch('/api/backups', {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(list){ backups = list || []; renderBackups(); })
+      .catch(function(){ /* 连不上就保持上一次的列表 */ });
+  }
+
   function refresh(){
     setPill('同步中', true);
     return fetch('/api/state', {cache:'no-store'})
@@ -373,6 +463,7 @@
         $('#boxIp').textContent = st.ip ? (st.ip + ':' + st.port) : '未连接网络';
         setPill('✔ 已连接', true);
         render();
+        loadBackups();          // 每次写入都会多一份备份，顺便一起刷新
         if ($('#adv').open){ loadRaw(); }
       })
       .catch(function(e){
@@ -409,6 +500,22 @@
         activeHost = null;
         return refresh();
       })
+      .catch(function(m){ toast(m.message || m, false); })
+      .then(function(){ btn.disabled = false; });
+  });
+
+  $('#bkReload').addEventListener('click', function(){
+    loadBackups().then(function(){ toast('备份列表已刷新'); });
+  });
+
+  $('#bkClear').addEventListener('click', function(){
+    if (!backups.length) return;
+    if (!confirm('清空全部 ' + backups.length + ' 个备份？\n\n清空后就回滚不了了，'
+                 + '不确定的话先恢复到某一份再清空')) return;
+    var btn = this;
+    btn.disabled = true;
+    post('/api/backup/clear', '')
+      .then(function(){ toast('备份已清空'); loadBackups(); })
       .catch(function(m){ toast(m.message || m, false); })
       .then(function(){ btn.disabled = false; });
   });

@@ -1462,54 +1462,40 @@ public class MainActivity extends Activity {
         dlg.show();
     }
 
-    /** hosts.bak.20261029_101010 → 2026-10-29 10:10:10（电视上比原始文件名好认） */
-    private String prettyBackupName(String name) {
-        String s = name.startsWith("hosts.bak.") ? name.substring("hosts.bak.".length()) : name;
-        boolean beforeRestore = s.contains("_before_restore");
-        s = s.replace("_before_restore", "");
-        if (s.matches("\\d{8}_\\d{6}")) {
-            s = s.substring(0, 4) + "-" + s.substring(4, 6) + "-" + s.substring(6, 8)
-                    + "   " + s.substring(9, 11) + ":" + s.substring(11, 13)
-                    + ":" + s.substring(13, 15);
-        }
-        return s + (beforeRestore ? "   （恢复前自动备份）" : "");
-    }
+    // ==================== 备份列表 ====================
+    // 以前点一条就直接恢复——恢复是不可撤销的写入，手滑一下就把 hosts 覆盖了。
+    // 现在点一条先问要干什么（恢复 / 改名 / 删除），清空另给一个按钮并二次确认。
 
     private void showBackupList() {
         new Thread(new Runnable() {
             @Override public void run() {
-                final List<String> backups = HostsManager.listBackups();
+                final List<HostsManager.Backup> backups = HostsManager.listBackupsDetail();
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (backups.isEmpty()) {
-                            toast("暂无备份（首次写入时会自动生成）");
+                            toast("暂无备份（写入或恢复时会自动生成）");
                             return;
                         }
-                        Collections.reverse(backups); // 新→旧
+                        // 已经是新→旧（按名字里的时间戳排，不靠 mtime）
+                        final String[] names = new String[backups.size()];
                         final String[] labels = new String[backups.size()];
                         for (int i = 0; i < backups.size(); i++) {
-                            labels[i] = prettyBackupName(backups.get(i));
+                            names[i] = backups.get(i).name;
+                            labels[i] = HostsManager.backupLabelText(backups.get(i));
                         }
                         newDialog()
-                                .setTitle("选择要恢复的备份（共 " + backups.size() + " 个，新→旧）")
+                                .setTitle("备份（共 " + backups.size() + " 个，新→旧）")
                                 .setItems(labels,
                                         new android.content.DialogInterface.OnClickListener() {
                                     @Override public void onClick(android.content.DialogInterface d, int w) {
-                                        // w 是索引，取对应名字
-                                        final String name = backups.get(w);
-                                        new Thread(new Runnable() {
-                                            @Override public void run() {
-                                                final String err = HostsManager.restoreBackup(name);
-                                                runOnUiThread(new Runnable() {
-                                                    @Override public void run() {
-                                                        showActionResult(err == null,
-                                                                err == null ? "已恢复 " + name
-                                                                        : "恢复失败：" + err);
-                                                        loadHostsAsync();
-                                                    }
-                                                });
-                                            }
-                                        }, "restore").start();
+                                        // 交给操作菜单，别在这里直接恢复
+                                        showBackupActionMenu(names[w], labels[w]);
+                                    }
+                                })
+                                .setNeutralButton("清空全部",
+                                        new android.content.DialogInterface.OnClickListener() {
+                                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                                        confirmClearBackups(backups.size());
                                     }
                                 })
                                 .setNegativeButton("取消", null)
@@ -1518,6 +1504,170 @@ public class MainActivity extends Activity {
                 });
             }
         }, "list-backups").start();
+    }
+
+    /** 单份备份的操作菜单：恢复 / 改名 / 删除 */
+    private void showBackupActionMenu(final String name, final String label) {
+        newDialog()
+                .setTitle(label)
+                .setItems(new String[]{"恢复到这份", "改个名字（好认）", "删除这份"},
+                        new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        if (w == 0) confirmRestoreBackup(name, label);
+                        else if (w == 1) showRenameBackupDialog(name);
+                        else confirmDeleteBackup(name, label);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 恢复前再问一次：恢复会直接覆盖 /system/etc/hosts */
+    private void confirmRestoreBackup(final String name, final String label) {
+        newDialog()
+                .setTitle("恢复到这份？")
+                .setMessage(label + "\n\n当前 hosts 会先自动备份一份，可再恢复回来。")
+                .setPositiveButton("恢复", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        doRestoreBackup(name, label);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doRestoreBackup(final String name, final String label) {
+        toast("正在恢复 " + label + " …");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String err = HostsManager.restoreBackup(name);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        showActionResult(err == null,
+                                err == null ? "已恢复到 " + label + "（原文件已备份）"
+                                        : "恢复失败：" + err);
+                        loadHostsAsync();
+                    }
+                });
+            }
+        }, "restore").start();
+    }
+
+    /** 删除前再问一次：删掉就没有了 */
+    private void confirmDeleteBackup(final String name, final String label) {
+        newDialog()
+                .setTitle("删除这份备份？")
+                .setMessage(label + "\n\n只删这份备份，不影响当前 hosts。")
+                .setPositiveButton("删除", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        doDeleteBackup(name, label);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doDeleteBackup(final String name, final String label) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String err = HostsManager.deleteBackup(name);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        showActionResult(err == null,
+                                err == null ? "已删除 " + label : "删除失败：" + err);
+                        showBackupList();     // 还要接着删下一份就不用重进
+                    }
+                });
+            }
+        }, "del-backup").start();
+    }
+
+    /**
+     * 清空全部：恢复记录也没了，所以单独确认一次，并把"现在 hosts 是对的"摆在最上面。
+     * 真要一键回滚，靠的就是这些备份，清空前提醒一句值这个弹窗。
+     */
+    private void confirmClearBackups(final int count) {
+        newDialog()
+                .setTitle("清空全部 " + count + " 个备份？")
+                .setMessage("清空后无法回滚，请先确认当前 hosts 是你想要的。\n"
+                        + "（不确定的话，先恢复到某一份再清空）")
+                .setPositiveButton("清空", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        doClearBackups();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doClearBackups() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String err = HostsManager.clearBackups();
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        showActionResult(err == null,
+                                err == null ? "备份已清空（当前 hosts 没动）"
+                                        : "清空失败：" + err);
+                        showBackupList();     // 清空失败时列表会说明还剩哪些
+                    }
+                });
+            }
+        }, "clear-backups").start();
+    }
+
+    /**
+     * 给备份改名。
+     * 只改显示名，文件名不动——文件名要进 root 命令，必须保持 ASCII 白名单；
+     * 显示名随便打（中文也行），存在 prefs 里。
+     */
+    private void showRenameBackupDialog(final String name) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(us(30), us(14), us(30), us(6));
+
+        TextView tip = new TextView(this);
+        tip.setText("起个自己认得出的名字，例：改 emby 前 / 加了奈飞");
+        tip.setTextColor(COLOR_HINT);
+        tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
+        box.addView(tip);
+
+        final EditText et = new EditText(this);
+        et.setSingleLine(true);
+        et.setHint("留空则只显示时间和条数");
+        et.setText(HostsManager.backupLabelOf(name));
+        LinearLayout.LayoutParams lpEt = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpEt.topMargin = us(12);
+        et.setLayoutParams(lpEt);
+        box.addView(et);
+
+        final AlertDialog dlg = newDialog()
+                .setTitle("给备份起个名字")
+                .setView(box)
+                .setPositiveButton("保存", null)   // 点击行为在 show() 后拦截
+                .setNeutralButton("恢复默认名", null)
+                .setNegativeButton("取消", null)
+                .create();
+        dlg.show();
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                String err = HostsManager.renameBackup(name, et.getText().toString());
+                if (err != null) { toast(err); return; }
+                toast("已改名");
+                dlg.dismiss();
+                showBackupList();     // 名字变了，列表重开一次
+            }
+        });
+        dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                String err = HostsManager.renameBackup(name, "");
+                if (err != null) { toast(err); return; }
+                toast("已恢复默认名");
+                dlg.dismiss();
+                showBackupList();
+            }
+        });
     }
 
     // ==================== Tab 1: 扫码配置 ====================
