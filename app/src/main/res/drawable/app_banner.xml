@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android TV 桌面用的横幅（banner）：Leanback 启动器只显示 android:banner，
+  没有它就会被拉伸成方图、或者直接不出现在电视桌面上。
+  尺寸按官方规范 320×180dp，铺品牌深海蓝底 + 白色 H 字标。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+
+    <path
+        android:fillColor="#0A1120"
+        android:pathData="M16,0 h288 a16,16 0 0 1 16,16 v148 a16,16 0 0 1 -16,16 h-288 a16,16 0 0 1 -16,-16 v-148 a16,16 0 0 1 16,-16 z" />
+
+    <!-- H：左右两竖 + 中间一横，用形状拼而不是贴文字，任何分辨率都清晰 -->
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M118,52 h20 v76 h-20 z" />
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M182,52 h20 v76 h-20 z" />
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M138,84 h44 v16 h-44 z" />
+</vector>

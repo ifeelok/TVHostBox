@@ -6,6 +6,7 @@ import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -56,8 +57,12 @@ public final class ConfigServer {
 
     public static synchronized void start() throws Exception {
         if (running) return;
-        serverSocket = new ServerSocket(PORT, 8);
+        // setReuseAddress 必须赶在 bind 之前：new ServerSocket(port, backlog) 会立刻 bind，
+        // 写在后面毫无作用。结果就是「停止服务 → 再启动」必报 Address already in use
+        // （刚服务过的连接还挂在 18123 上处于 TIME_WAIT）。
+        serverSocket = new ServerSocket();
         serverSocket.setReuseAddress(true);
+        serverSocket.bind(new InetSocketAddress(PORT), 8);
         running = true;
         acceptThread = new Thread(new Runnable() {
             @Override public void run() {
@@ -179,7 +184,7 @@ public final class ConfigServer {
                     respond(s, 400, "text/plain; charset=utf-8", "IP 无效：" + ip);
                     return;
                 }
-                if (domain == null || !domain.trim().matches("(?i)[a-z0-9._\\-]+")) {
+                if (!HostsManager.isValidDomain(domain == null ? null : domain.trim())) {
                     respond(s, 400, "text/plain; charset=utf-8", "域名无效：" + domain);
                     return;
                 }

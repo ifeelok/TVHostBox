@@ -82,6 +82,9 @@ public class MainActivity extends Activity {
     private List<HostsManager.Entry> entries = new ArrayList<HostsManager.Entry>();
 
     // 扫码面板
+    /** 二维码缓存：URL 没变就不重算（生成一次要 16 万次像素写入） */
+    private Bitmap qrCached = null;
+    private String qrCachedUrl = "";
     private TextView tvQrUrl;
     private TextView tvServerStatus;
     private ImageView imgQr;
@@ -98,8 +101,20 @@ public class MainActivity extends Activity {
     private int cfSel = 0;                // 成绩单里光标停在第几条
     private int cfWinFrom = 0;            // 成绩单窗口的第一条（结果多于可见行时滚动）
     private boolean cfBoardFocused = false; // 过程表当前是否有焦点（选中行亮块跟随）
+    /**
+     * 成绩单是「框态」还是「已进入条目」。
+     * 框态 = 焦点停在整个结果框上，↑↓ 直接离开（↓ 一下就到「重新优选」），OK 才进条目；
+     * 已进条目 = ↑↓ 在结果里走，返回退回框态。和 hosts 列表同一套手感。
+     */
+    private boolean cfEntered = false;
+    // 成绩单方向键长按加速：结果上百条时，一格一格挪要按到手酸
+    private long cfLastMoveAt = 0;
+    private int cfMoveStreak = 0;
+    private boolean cfLastUp = false;
     private volatile boolean cfRunning = false;
     private volatile CfOptimizer cfOpt = null; // 当前优选任务（用于取消）
+    /** 这一轮是用户主动取消的（不是跑完却一条都没有），表尾文案要区分开 */
+    private boolean cfCancelled = false;
 
     // ---- CF 过程表：跑的时候是扫描流水，跑完原地变成绩单（同一块区域、可选中写入） ----
     private LinearLayout cfLive;
@@ -111,8 +126,19 @@ public class MainActivity extends Activity {
     private android.widget.ScrollView liveScroll;      // 过程表的滚动容器（行数多于可见高度时用）
     private LinearLayout liveRowsBox;                  // 表体容器：行数按可用高度动态增减
     private int liveRowCount = 0;
-    private TextView liveHeadLat, liveHeadSpeed;       // 列头「延迟 / 速度」，随阶段显隐
+    private TextView liveHeadRegion, liveHeadLat, liveHeadSpeed;   // 列头「地区 / 延迟 / 速度」，随阶段显隐
+    private View liveHeadRow;                          // 列头整行（空态跟着表体一起藏）
+    private LinearLayout cfIdleBox;                    // 空态占位：没数据时不画表格骨架
+    private TextView cfIdleTitle, cfIdleText;
+    /** CF 过程表三列的宽度（列头与数据行必须共用，否则对不齐） */
+    private static final int COL_REGION = 96, COL_BAR = 76, COL_LAT = 76, COL_SPEED = 92;
     private String lastPhaseRendered = "";             // 阶段切换时把表滚回顶部
+    /**
+     * 机房探测结果暂存：IP → 三字机房码。
+     * 探测（1KB）比下载测速（6~12MB）快得多，几乎总是先于 onSpeedStarted 返回；
+     * 那时流水行还没建出来，直接回填会扑空。先存在这里，行建出来时自己取。
+     */
+    private final java.util.Map<String, String> coloPending = new java.util.HashMap<String, String>();
     /** 延迟阶段：已通的那些 IP（按延迟升序展示） */
     private final List<CfOptimizer.Candidate> liveLat = new ArrayList<CfOptimizer.Candidate>();
     /** 测速阶段：候选池，mbps = -2 表示"正在测"，-1 失败，>0 为实测值 */
@@ -361,8 +387,10 @@ public class MainActivity extends Activity {
         } else if (index == 1) {
             return btnQrRefresh != null && btnQrRefresh.requestFocus();
         } else {
-            // 过程表就是成绩单：跑过就直接回到表上（表里 ↑↓ 选、OK 写入）
+            // 过程表就是成绩单：跑过就回到"框态"（↑↓ 直接离开这一块，OK 才进条目），
+            // 和切到 hosts 页一样——换页不该把人丢进一百条结果中间
             if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+                cfEntered = false;
                 return cfLive.requestFocus();
             }
             return btnCfStart != null && btnCfStart.requestFocus();
@@ -787,6 +815,10 @@ public class MainActivity extends Activity {
                 String domain = etDomain.getText().toString().trim();
                 if (!HostsManager.isValidIp(ip)) { toast("IP 无效，请检查"); return; }
                 if (domain.isEmpty()) { toast("域名为空"); return; }
+                if (!HostsManager.isValidDomain(domain)) {
+                    toast("域名无效，只能用字母、数字、. _ -");
+                    return;
+                }
                 prefs.edit().putString("lastDomain", domain).apply();
                 dlg.dismiss();
                 doUpsertAsync(domain, ip);
@@ -822,10 +854,8 @@ public class MainActivity extends Activity {
      * 更新是低频动作，占按钮行一整格太奢侈。
      */
     private void showSettingsDialog() {
-        int keep = prefs.getInt(HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
-        int sample = prefs.getInt(PREF_CF_SAMPLE, 320);
-        int mb = prefs.getInt(PREF_CF_DOWNLOAD_MB, 6);
-
+        // 各行的当前值由 optionRow 自己从 prefs 读（settingValueText 统一翻译），
+        // 这里不再预先取一份——取了也会和选项回调里的另一份写法脱节
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(us(36), us(6), us(36), us(20));
@@ -841,37 +871,22 @@ public class MainActivity extends Activity {
         View first = settingRow(box, "主题", th.name, new View.OnClickListener() {
             @Override public void onClick(View v) { pickTheme(); }
         });
-        settingRow(box, "备份保留数量",
-                keep <= 0 ? "不限制" : keep + " 份", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                pickFromOptions("备份保留数量（写入时自动清理）",
-                        new String[]{"保留最近 10 份", "保留最近 20 份", "保留最近 50 份", "不限制"},
-                        new int[]{10, 20, 50, 0},
-                        HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
-            }
-        });
+        optionRow(box, "备份保留数量", "备份保留数量（写入时自动清理）",
+                new String[]{"保留最近 10 份", "保留最近 20 份", "保留最近 50 份", "不限制"},
+                new int[]{10, 20, 50, 0},
+                HostsManager.PREF_MAX_BACKUPS, HostsManager.DEFAULT_MAX_BACKUPS);
 
         settingsSection(box, "Cloudflare 优选", false);
         // 「结果保留条数」已去掉：跑完的测速结果全部列出来（按速度排好），
         // 少了一个"只能看前 N 名"的心智负担，也少一次设置项
-        settingRow(box, "网段采样数量",
-                sample + (sample == 160 ? "（快）" : sample == 320 ? "（标准）" : "（充分）"),
-                new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                pickFromOptions("CF 网段采样数量（越多越准越慢）",
-                        new String[]{"160 个（快）", "320 个（标准）", "640 个（充分）"},
-                        new int[]{160, 320, 640},
-                        PREF_CF_SAMPLE, 320);
-            }
-        });
-        settingRow(box, "单 IP 测速流量", mb + " MB", new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                pickFromOptions("每个候选 IP 的测速下载量",
-                        new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
-                        new int[]{2, 6, 12},
-                        PREF_CF_DOWNLOAD_MB, 6);
-            }
-        });
+        optionRow(box, "网段采样数量", "CF 网段采样数量（越多越准越慢）",
+                new String[]{"160 个（快）", "320 个（标准）", "640 个（充分）"},
+                new int[]{160, 320, 640},
+                PREF_CF_SAMPLE, 320);
+        optionRow(box, "单 IP 测速流量", "每个候选 IP 的测速下载量",
+                new String[]{"2 MB（快）", "6 MB（标准）", "12 MB（精确）"},
+                new int[]{2, 6, 12},
+                PREF_CF_DOWNLOAD_MB, 6);
 
         settingsSection(box, "应用", false);
         settingRow(box, "检查更新", "当前 v" + appVersion(), new View.OnClickListener() {
@@ -880,7 +895,7 @@ public class MainActivity extends Activity {
         settingRow(box, "启动时自动检查更新",
                 prefs.getBoolean(PREF_AUTO_UPDATE, true) ? "已开启" : "已关闭",
                 new View.OnClickListener() {
-            @Override public void onClick(View v) { kickAutoUpdate(); }
+            @Override public void onClick(View v) { kickAutoUpdate(v); }
         });
 
         AlertDialog dlg = newDialog()
@@ -967,6 +982,8 @@ public class MainActivity extends Activity {
                 chev.setTextColor(hasFocus ? COLOR_ON_FOCUS : COLOR_ACCENT);
             }
         });
+        // 把"当前值"那个 TextView 挂在行上，改完设置直接就地刷新它（见 setSettingValue）
+        row.setTag(tvValue);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = us(10);
@@ -974,8 +991,50 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    /** 自动检查升级开关：改完回到设置总览，方便连续调 */
-    private void kickAutoUpdate() {
+    /**
+     * 把设置值翻译成行右侧显示的文字。
+     * 取值和显示收在一处：以前行上写一次、选项回调里再拼一次，
+     * 改了显示文案很容易只改一边，出现"选了 12MB 行上还写 6MB"。
+     */
+    private String settingValueText(String key, int v) {
+        if (HostsManager.PREF_MAX_BACKUPS.equals(key)) return v <= 0 ? "不限制" : v + " 份";
+        if (PREF_CF_SAMPLE.equals(key)) {
+            return v + (v == 160 ? "（快）" : v == 320 ? "（标准）" : "（充分）");
+        }
+        if (PREF_CF_DOWNLOAD_MB.equals(key)) return v + " MB";
+        return String.valueOf(v);
+    }
+
+    /** 就地改设置行右侧的值，不重开弹窗 */
+    private void setSettingValue(View row, String value) {
+        if (row == null) return;
+        Object tag = row.getTag();
+        if (tag instanceof TextView) ((TextView) tag).setText(value);
+    }
+
+    /**
+     * 带单选的设置行：右侧显示当前值，OK 弹出选项，选完就地改这一行的值。
+     *
+     * 以前选完是「关掉子菜单 → 再 new 一个设置弹窗盖上去」，底下那个旧的从没被关掉。
+     * 结果按返回先露出底下那个（显示的还是旧值），得再按一次才真的退出，
+     * 看着就像"菜单关不掉"。
+     */
+    private View optionRow(LinearLayout box, String label, final String title,
+                           final String[] labels, final int[] values,
+                           final String key, int defValue) {
+        return settingRow(box, label, settingValueText(key, prefs.getInt(key, defValue)),
+                new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                pickFromOptions(title, labels, values, key, defValue, v);
+            }
+        });
+    }
+
+    /**
+     * 自动检查升级开关。
+     * 同样改成就地刷新行上的值（具体原因见 pickFromOptions 的注释）。
+     */
+    private void kickAutoUpdate(final View rowToRefresh) {
         final boolean on = prefs.getBoolean(PREF_AUTO_UPDATE, true);
         newDialog()
                 .setTitle("启动时自动检查更新")
@@ -985,9 +1044,7 @@ public class MainActivity extends Activity {
                                 prefs.edit().putBoolean(PREF_AUTO_UPDATE, w == 0).apply();
                                 d.dismiss();
                                 toast(w == 0 ? "已开启：启动时会自动检查新版本" : "已关闭自动检查更新");
-                                ui.postDelayed(new Runnable() {
-                                    @Override public void run() { showSettingsDialog(); }
-                                }, 240);
+                                setSettingValue(rowToRefresh, w == 0 ? "已开启" : "已关闭");
                             }
                         })
                 .setNegativeButton("取消", null)
@@ -1290,10 +1347,14 @@ public class MainActivity extends Activity {
 
                     // root 静默安装：先落到 /data/local/tmp（adb install 用的同一路径，
                     // 系统包管理器对这个位置有读权限），装完再自启
+                    // pm 的「Success / Failure [INSTALL_FAILED_xxx]」走的是 stderr，
+                    // 而 RootShell 只收 stdout（stderr 被独立线程排空防阻塞，本来就收不到）。
+                    // 不在这里 2>&1 合并，失败时弹窗里的"原因"就是一片空白，无从排查。
                     String cmd = "cp '" + apk.getAbsolutePath() + "' /data/local/tmp/tvhostbox_update.apk\n"
                             + "chmod 644 /data/local/tmp/tvhostbox_update.apk\n"
-                            + "pm install -r /data/local/tmp/tvhostbox_update.apk\n"
+                            + "OUT=$(pm install -r /data/local/tmp/tvhostbox_update.apk 2>&1)\n"
                             + "RC=$?\n"
+                            + "echo \"$OUT\"\n"
                             + "rm -f /data/local/tmp/tvhostbox_update.apk\n"
                             + "if [ $RC -eq 0 ]; then sleep 1; am start -n tv.hostbox.app/.MainActivity >/dev/null 2>&1; fi\n"
                             + "echo hostbox_rc=$RC";
@@ -1360,8 +1421,16 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /**
+     * 单选设置。
+     *
+     * 选完只做两件事：写 prefs + 就地改那一行的值。
+     * 以前的写法是关掉子菜单再 new 一个设置弹窗盖上去，底下那个旧的从没被关掉——
+     * 按返回先露出底下那个（显示的还是旧值，比如选了 12MB 却看到 6MB），
+     * 再按一次才真的退出，看着像"菜单关不掉"。
+     */
     private void pickFromOptions(String title, final String[] labels, final int[] values,
-                                 final String key, int defValue) {
+                                 final String key, int defValue, final View rowToRefresh) {
         int current = prefs.getInt(key, defValue);
         int checked = 0;
         for (int i = 0; i < values.length; i++) {
@@ -1374,10 +1443,8 @@ public class MainActivity extends Activity {
                         prefs.edit().putInt(key, values[w]).apply();
                         d.dismiss();
                         toast("已设置：" + labels[w]);
-                        // 改完回到设置总览，便于连续调多项，不用一层层重新进
-                        new android.os.Handler(getMainLooper()).postDelayed(new Runnable() {
-                            @Override public void run() { showSettingsDialog(); }
-                        }, 240);
+                        // 就地刷新，连续调多项也不用一层层重新进
+                        setSettingValue(rowToRefresh, settingValueText(key, values[w]));
                     }
                 })
                 .setNegativeButton("取消", null)
@@ -1480,9 +1547,14 @@ public class MainActivity extends Activity {
         head.addView(tvServerStatus, lpStatus);
 
         imgQr = new ImageView(this);
-        // 网址已挪出卡片（做成整行地址栏），卡片里只有二维码，可以放大一档
-        int qrSide = (int) Math.min(dp(210),
-                getResources().getDisplayMetrics().widthPixels * 0.26f);
+        // 网址已挪出卡片（做成整行地址栏），卡片里只有二维码，可以放大一档。
+        // 尺寸全部在「设计 dp」里算好（屏宽也换成设计 dp），再统一转 px——
+        // 不然 4K 上按物理密度算出来的宽度会比实际排版宽度大 20%，判断会失准。
+        int screenWdp = (int) (getResources().getDisplayMetrics().widthPixels
+                / Math.max(0.5f, getResources().getDisplayMetrics().density * uiScale()));
+        if (screenWdp <= 0) screenWdp = 1280;              // 拿不到尺寸就按最常见的 16:9 处理
+        int qrSideDp = qrSideDp(screenWdp);
+        int qrSide = dp(qrSideDp);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(qrSide, qrSide);
         lp.gravity = Gravity.CENTER_HORIZONTAL;
         imgQr.setLayoutParams(lp);
@@ -1523,9 +1595,29 @@ public class MainActivity extends Activity {
         lpT.setMargins(dp(20), 0, 0, 0);
         tips.setLayoutParams(lpT);
 
-        tips.addView(stepRow("1", "手机连上同一个 Wi-Fi", "和盒子在同一个路由器下即可，不用装任何 App"));
-        tips.addView(stepRow("2", "扫码打开配置页", "相机扫左侧二维码，或在浏览器里输入上面的网址"));
-        tips.addView(stepRow("3", "增删条目，即时生效", "保存后电视这边会提示「手机端已更新 hosts」"));
+        // 三步说明：宽屏横排等分，窄屏竖排。
+        // 竖排时每步只占 200dp 左右，右边一大片是空的——电视上看着像界面没做完，
+        // 而电视屏恰恰是最宽的那类屏，所以按可用宽度切成横排三张。
+        boolean wide = stepsFitWide(screenWdp, qrSideDp);
+        LinearLayout steps = new LinearLayout(this);
+        steps.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        steps.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        String[][] stepData = {
+                {"1", "手机连上同一个 Wi-Fi", "和盒子在同一个路由器下即可，不用装任何 App"},
+                {"2", "扫码打开配置页", "相机扫左侧二维码，或在浏览器里输入上面的网址"},
+                {"3", "增删条目，即时生效", "保存后电视这边会提示「手机端已更新 hosts」"},
+        };
+        for (int i = 0; i < stepData.length; i++) {
+            View sv = stepRow(stepData[i][0], stepData[i][1], stepData[i][2], wide);
+            if (wide && i > 0) {
+                LinearLayout.LayoutParams p = (LinearLayout.LayoutParams) sv.getLayoutParams();
+                p.leftMargin = dp(20);
+                sv.setLayoutParams(p);
+            }
+            steps.addView(sv);
+        }
+        tips.addView(steps);
 
         View spacer = new View(this);
         tips.addView(spacer, new LinearLayout.LayoutParams(
@@ -1579,13 +1671,40 @@ public class MainActivity extends Activity {
         return root;
     }
 
-    /** 扫码页的一步：圆形序号 + 主文案 + 补充说明 */
-    private View stepRow(String no, String main, String sub) {
+    /**
+     * 二维码边长（dp）：跟着屏宽长，最多 240dp。
+     * 纯函数（不碰 Resources），这样窄屏/4K 的取舍可以直接测。
+     */
+    static int qrSideDp(int screenWdp) {
+        return Math.min(240, Math.round(screenWdp * 0.30f));
+    }
+
+    /**
+     * 三步说明该横排还是竖排（纯计算，好测）。
+     *
+     * 竖排时每步只占 200dp 左右，右边一大片是空的——电视上看着像界面没做完，
+     * 而电视恰恰是最宽的那类屏，所以宽够就切成横排三格。
+     * 每格至少要 220dp（圆点 28 + 主文案最宽 13 字 @15sp ≈ 195dp），三格连间距 ≈ 700dp；
+     * 手机、分屏、老 4:3 给不到这个宽度，退回竖排才不会把字挤成两行。
+     *
+     * @param contentWdp 整屏宽度（dp，根布局的 44dp×2 安全边距在方法里扣）
+     * @param qrSideDp   二维码边长（dp）
+     */
+    static boolean stepsFitWide(int contentWdp, int qrSideDp) {
+        // 卡片左右内边距 18×2，加上说明列左边距 20
+        int tipsW = contentWdp - 88 - (qrSideDp + 36 + 20);
+        return tipsW >= 700;
+    }
+
+    /** 扫码页的一步：圆形序号 + 主文案 + 补充说明（wide = 横排时等分宽度） */
+    private View stepRow(String no, String main, String sub, boolean wide) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.TOP);
-        LinearLayout.LayoutParams lpRow = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams lpRow = wide
+                ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                : new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lpRow.bottomMargin = dp(12);
         row.setLayoutParams(lpRow);
 
@@ -1661,6 +1780,12 @@ public class MainActivity extends Activity {
         }
         final String url = "http://" + ip + ":" + ConfigServer.PORT;
         tvQrUrl.setText(url);
+        // 同一个 URL 的二维码只要算一次：每次切到这页 / 从后台回来都要重画 16 万个像素
+        // （逐点 setPixel 是 JNI 调用，低端盒子上肉眼可见的卡顿），IP 不变就没必要重算
+        if (url.equals(qrCachedUrl) && qrCached != null) {
+            imgQr.setImageBitmap(qrCached);
+            return;
+        }
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
@@ -1668,6 +1793,8 @@ public class MainActivity extends Activity {
                     final Bitmap bmp = qrToBitmap(qr, 16, 4);
                     runOnUiThread(new Runnable() {
                         @Override public void run() {
+                            qrCached = bmp;
+                            qrCachedUrl = url;
                             imgQr.setImageBitmap(bmp);
                         }
                     });
@@ -1682,15 +1809,19 @@ public class MainActivity extends Activity {
         }, "gen-qr").start();
     }
 
+    /** 逐像素铺位图：一次 QR 约 16 万次调用，所以调用方按 URL 缓存结果 */
     private Bitmap qrToBitmap(QrCode qr, int scale, int border) {
         int size = (qr.size + border * 2) * scale;
-        Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+        int[] pixels = new int[size * size];
         for (int y = 0; y < size; y++) {
             for (int x = 0; x < size; x++) {
+                // 一次算好再整体写入，比逐点 setPixel 快一个数量级
                 boolean black = qr.getModule(x / scale - border, y / scale - border);
-                bmp.setPixel(x, y, black ? Color.BLACK : Color.WHITE);
+                pixels[y * size + x] = black ? Color.BLACK : Color.WHITE;
             }
         }
+        Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565);
+        bmp.setPixels(pixels, 0, size, 0, 0, size, size);
         return bmp;
     }
 
@@ -1780,13 +1911,14 @@ public class MainActivity extends Activity {
         return root;
     }
 
-    /** 实时面板的一行：序号 + IP + 质量条 + 指标 */
+    /** 实时面板的一行：序号 + IP + 地区 + 质量条 + 延迟 + 速度 */
     private static final class LiveRow {
         LinearLayout root;
         TextView rank;
         TextView ip;
-        TextView metric;    // 速度（Mbps）/ 测速中 / 失败
-        TextView lat;       // 延迟（ms）：延迟阶段是主指标，测速阶段作为第二列一直挂着
+        TextView region;   // 国家 + CF 三字机房码（如「美国 LAX」）
+        TextView metric;   // 速度（Mbps）/ 测速中 / 失败
+        TextView lat;      // 延迟（ms）：延迟阶段是主指标，测速阶段作为第二列一直挂着
         Bar bar;
     }
 
@@ -1815,7 +1947,8 @@ public class MainActivity extends Activity {
         card.setFocusableInTouchMode(false);
         card.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) {
-                v.setBackground(hasFocus ? Skin.cardFocus(th) : Skin.card(th));
+                // 框态 = 整块亮边（"这个框子被选中了"）；进了条目就把亮边交给行，卡片回落成普通卡
+                v.setBackground(hasFocus && !cfEntered ? Skin.cardFocus(th) : Skin.card(th));
                 cfBoardFocused = hasFocus;
                 renderLiveBoard();       // 选中行的亮块跟着焦点亮/暗
                 if (hasFocus) setHint(cfBoardHint());
@@ -1825,10 +1958,35 @@ public class MainActivity extends Activity {
             @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
                 boolean grid = cfFinished && !cfResults.isEmpty();
+                // 框态（还没按 OK 进条目）：↑↓ 不当作在列表里走，直接离开这一整块。
+                // 这才是不用按 100 次下键就能回到「重新优选」的关键——按一下 ↓ 就出去了。
+                if (!cfEntered) {
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                        return navCfBtn != null && navCfBtn.requestFocus();
+                    }
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                        return btnCfStart != null && btnCfStart.requestFocus();
+                    }
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+                        // 有结果才能进；空表按 OK 不做事
+                        if (!grid) return true;
+                        cfEntered = true;
+                        cfResetMoveStep();
+                        keepSelVisible();
+                        v.setBackground(Skin.card(th));
+                        renderLiveBoard();
+                        setHint(cfBoardHint());
+                        return true;
+                    }
+                    return keyCode == KeyEvent.KEYCODE_DPAD_LEFT
+                            || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT;
+                }
+                // ---- 已进入条目：↑↓ 在结果里走，到边界才离开 ----
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                    // 成绩单：先在同一张表里往上走，走到第一条才交给页签
-                    if (grid && cfSel > 0) {
-                        cfSel--;
+                    if (grid) {
+                        if (cfSel <= 0) return navCfBtn != null && navCfBtn.requestFocus();
+                        int next = cfSel - cfMoveStep(true);
+                        cfSel = next < 0 ? 0 : next;
                         keepSelVisible();
                         renderLiveBoard();
                         return true;
@@ -1836,20 +1994,49 @@ public class MainActivity extends Activity {
                     return navCfBtn != null && navCfBtn.requestFocus();
                 }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                    if (grid && cfSel < cfResults.size() - 1) {
-                        cfSel++;
+                    if (grid) {
+                        int last = cfResults.size() - 1;
+                        if (cfSel >= last) return btnCfStart != null && btnCfStart.requestFocus();
+                        int next = cfSel + cfMoveStep(false);
+                        cfSel = next > last ? last : next;
                         keepSelVisible();
                         renderLiveBoard();
                         return true;
                     }
                     return btnCfStart != null && btnCfStart.requestFocus();
                 }
+                if (keyCode == KeyEvent.KEYCODE_PAGE_UP) {
+                    if (!grid) return true;
+                    cfResetMoveStep();
+                    cfSel = 0;
+                    keepSelVisible();
+                    renderLiveBoard();
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_PAGE_DOWN) {
+                    if (!grid) return true;
+                    // 直接跳到最后一条：再按一下 ↓ 就到按钮行
+                    cfResetMoveStep();
+                    cfSel = cfResults.size() - 1;
+                    if (cfSel < 0) cfSel = 0;
+                    keepSelVisible();
+                    renderLiveBoard();
+                    return true;
+                }
                 if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-                    // 成绩单上 OK = 把这一条写进 hosts；跑的时候不响应
+                    // 条目上 OK = 把这一条写进 hosts
                     if (grid && cfSel >= 0 && cfSel < cfResults.size()) {
                         showApplyDialog(cfResults.get(cfSel));
                         return true;
                     }
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_BACK) {
+                    // 退回框态：焦点还在这一块上，只是不再"进到条目里"
+                    cfEntered = false;
+                    v.setBackground(Skin.cardFocus(th));
+                    renderLiveBoard();
+                    setHint(cfBoardHint());
                     return true;
                 }
                 return keyCode == KeyEvent.KEYCODE_DPAD_LEFT
@@ -1899,8 +2086,19 @@ public class MainActivity extends Activity {
         hdr.setLayoutParams(lpHdr);
 
         hdr.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+
+        liveHeadRegion = new TextView(this);
+        liveHeadRegion.setText("地区");
+        liveHeadRegion.setTextColor(COLOR_HINT);
+        liveHeadRegion.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
+        liveHeadRegion.setGravity(Gravity.END);
+        LinearLayout.LayoutParams lpHr = new LinearLayout.LayoutParams(dp(COL_REGION),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpHr.setMargins(0, 0, dp(12), 0);
+        hdr.addView(liveHeadRegion, lpHr);
+
         View barGap = new View(this);
-        LinearLayout.LayoutParams lpBarGap = new LinearLayout.LayoutParams(dp(88), dp(1));
+        LinearLayout.LayoutParams lpBarGap = new LinearLayout.LayoutParams(dp(COL_BAR), dp(1));
         lpBarGap.setMargins(0, 0, dp(12), 0);
         hdr.addView(barGap, lpBarGap);
 
@@ -1909,7 +2107,7 @@ public class MainActivity extends Activity {
         liveHeadLat.setTextColor(COLOR_HINT);
         liveHeadLat.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
         liveHeadLat.setGravity(Gravity.END);
-        LinearLayout.LayoutParams lpHl = new LinearLayout.LayoutParams(dp(88),
+        LinearLayout.LayoutParams lpHl = new LinearLayout.LayoutParams(dp(COL_LAT),
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lpHl.setMargins(0, 0, dp(6), 0);
         hdr.addView(liveHeadLat, lpHl);
@@ -1919,9 +2117,10 @@ public class MainActivity extends Activity {
         liveHeadSpeed.setTextColor(COLOR_HINT);
         liveHeadSpeed.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(11));
         liveHeadSpeed.setGravity(Gravity.END);
-        hdr.addView(liveHeadSpeed, new LinearLayout.LayoutParams(dp(104),
+        hdr.addView(liveHeadSpeed, new LinearLayout.LayoutParams(dp(COL_SPEED),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         card.addView(hdr);
+        liveHeadRow = hdr;
 
         // 行数不写死、也不跟「保留条数」走：由这块区域的实际高度决定能放几行（ensureLiveRows）。
         // 固定 5/6 行时 320 个 IP 只有几条能露面，看着像"只测了这么几个"。
@@ -1937,6 +2136,38 @@ public class MainActivity extends Activity {
         liveScroll = sv;
         liveRowsBox = rowsBox;
         liveRowCount = 0;
+
+        // 空态占位：还没跑 / 跑完却一条都没有时用它占住表的位置。
+        // 以前这两态都是画满 6 行「–」加空灰条、列头孤零零悬在右上角，
+        // 3 米外看着像界面渲染坏了（"这 App 是不是没加载出来"），而不是"没数据"。
+        // 表体和它都占 1f：LinearLayout 会把 GONE 的子 View 排除在权重之外，同一块高度互不打架。
+        cfIdleBox = new LinearLayout(this);
+        cfIdleBox.setOrientation(LinearLayout.VERTICAL);
+        cfIdleBox.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lpIdle = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        lpIdle.topMargin = dp(6);
+        cfIdleBox.setLayoutParams(lpIdle);
+
+        cfIdleTitle = new TextView(this);
+        cfIdleTitle.setTextColor(COLOR_TEXT);
+        cfIdleTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(18));
+        cfIdleTitle.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        cfIdleTitle.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams lpIdleTitle = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpIdleTitle.bottomMargin = dp(10);
+        cfIdleBox.addView(cfIdleTitle, lpIdleTitle);
+
+        cfIdleText = new TextView(this);
+        cfIdleText.setTextColor(COLOR_HINT);
+        cfIdleText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
+        cfIdleText.setGravity(Gravity.CENTER);
+        cfIdleText.setLineSpacing(dp(4), 1f);
+        cfIdleBox.addView(cfIdleText, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        cfIdleBox.setVisibility(View.GONE);
+        card.addView(cfIdleBox);
         ensureLiveRows();          // 高度已知就立刻排；未知等布局回调
         sv.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b,
@@ -2005,8 +2236,21 @@ public class MainActivity extends Activity {
         lpIp.setMargins(dp(12), 0, dp(10), 0);
         row.addView(r.ip, lpIp);
 
+        // 地区列用的是中文国家名 + 三字机房码，等宽字体下中文会被拉宽，
+        // 这里保留默认字体，只对上列头；13sp 在 3 米外仍可辨。
+        r.region = new TextView(this);
+        r.region.setTextColor(COLOR_HINT);
+        r.region.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(13));
+        r.region.setGravity(Gravity.END);
+        r.region.setSingleLine(true);
+        r.region.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams lpRegion = new LinearLayout.LayoutParams(dp(COL_REGION),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRegion.setMargins(0, 0, dp(12), 0);
+        row.addView(r.region, lpRegion);
+
         r.bar = new Bar(this, Theme.alpha(th.text, th.light ? 0.12f : 0.14f), COLOR_ACCENT);
-        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(dp(88), dp(6));
+        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(dp(COL_BAR), dp(6));
         lpBar.setMargins(0, 0, dp(12), 0);
         row.addView(r.bar, lpBar);
 
@@ -2016,7 +2260,7 @@ public class MainActivity extends Activity {
         r.lat.setTypeface(android.graphics.Typeface.MONOSPACE);
         r.lat.setGravity(Gravity.END);
         r.lat.setSingleLine(true);
-        LinearLayout.LayoutParams lpLat = new LinearLayout.LayoutParams(dp(88),
+        LinearLayout.LayoutParams lpLat = new LinearLayout.LayoutParams(dp(COL_LAT),
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         lpLat.setMargins(0, 0, dp(6), 0);
         row.addView(r.lat, lpLat);
@@ -2027,7 +2271,7 @@ public class MainActivity extends Activity {
         r.metric.setTypeface(android.graphics.Typeface.MONOSPACE);
         r.metric.setGravity(Gravity.END);
         r.metric.setSingleLine(true);
-        row.addView(r.metric, new LinearLayout.LayoutParams(dp(104),
+        row.addView(r.metric, new LinearLayout.LayoutParams(dp(COL_SPEED),
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         r.root = row;
@@ -2080,12 +2324,16 @@ public class MainActivity extends Activity {
         }
         cfRunning = true;
         cfFinished = false;
+        cfCancelled = false;
         setBtnText(btnCfStart, "取消优选");
         btnCfStart.setContentDescription("OK 取消优选（再按一次中止）· ←→ 换一个按钮");
         refreshBtnHint(btnCfStart);
         cfResults.clear();
         cfSel = 0;
         cfWinFrom = 0;
+        cfEntered = false;   // 跑的时候过程表是块流水账，没有"进条目"这回事
+        cfResetMoveStep();
+        coloPending.clear();
         // 跑的时候过程表自动接管这块区域，表里逐条滚
         if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
         setLivePhase("sample");
@@ -2121,6 +2369,10 @@ public class MainActivity extends Activity {
                     setLivePhase("speed");
                     CfOptimizer.Candidate c = new CfOptimizer.Candidate(ip);
                     c.mbps = -2;    // -2 = 正在测速
+                    // 机房探测（1KB）比下载测速（6~12MB）快得多，几乎总是先返回。
+                    // 不接住先到的结果，这一行就永远停在段归属上，看不到 LAX。
+                    String pending = coloPending.get(ip);
+                    if (pending != null) c.colo = pending;
                     liveSpeed.add(c);
                     liveLast = ip + "  →  测速中…";
                 }
@@ -2134,6 +2386,28 @@ public class MainActivity extends Activity {
                         if (liveSpeed.get(i).ip.equals(ip)) { liveSpeed.get(i).mbps = mbps; break; }
                     }
                     liveLast = ip + (mbps > 0 ? String.format("  →  %.1f Mbps", mbps) : "  →  测速失败");
+                }
+                scheduleLiveRender();
+            }
+
+            /**
+             * 查到落点机房：把三字码贴到流水里对应的那一条上。
+             * 界面上是"复制品"（liveLat / liveSpeed 里是新建的 Candidate，
+             * 不是优选器内部那批对象），所以这里必须手工回填，否则地区列永远停在段归属。
+             */
+            @Override public void onColoMeasured(String ip, String colo) {
+                synchronized (liveLock) {
+                    // 先存起来：这一行可能还没建出来（onSpeedStarted 还没轮到它）
+                    coloPending.put(ip, colo);
+                    boolean hit = false;
+                    for (int i = 0; i < liveSpeed.size(); i++) {
+                        if (liveSpeed.get(i).ip.equals(ip)) { liveSpeed.get(i).colo = colo; hit = true; break; }
+                    }
+                    for (int i = 0; i < liveLat.size(); i++) {
+                        if (liveLat.get(i).ip.equals(ip)) { liveLat.get(i).colo = colo; break; }
+                    }
+                    // 该行还没建出来就别急着重绘，等它建出来时自己带上
+                    if (!hit) return;
                 }
                 scheduleLiveRender();
             }
@@ -2186,6 +2460,7 @@ public class MainActivity extends Activity {
                 } catch (final InterruptedException e) {
                     runOnUiThread(new Runnable() {
                         @Override                         public void run() {
+                            cfCancelled = true;
                             finishCfRun(0);
                             if (tvCfPhase != null) tvCfPhase.setText("已取消");
                             if (tvCfPct != null) tvCfPct.setText("—");
@@ -2261,9 +2536,12 @@ public class MainActivity extends Activity {
         cfFinished = true;
         cfSel = 0;
         cfWinFrom = 0;
+        cfResetMoveStep();
+        // 跑完一律回到框态：焦点停在整个结果框上，按一下 ↓ 就到「重新优选」，
+        // 不用先穿过一百条结果；想挑 IP 再按 OK 进条目。
+        cfEntered = false;
         if (cfLive != null) cfLive.setVisibility(View.VISIBLE);
         renderLiveBoard();
-        // 有结果就把焦点直接放到表上：少按一次方向键，也让人一眼看出"这里可以选"
         if (cfLive != null && resultCount > 0) cfLive.requestFocus();
         else if (btnCfStart != null) btnCfStart.requestFocus();
     }
@@ -2279,18 +2557,53 @@ public class MainActivity extends Activity {
         if (cfWinFrom < 0) cfWinFrom = 0;
     }
 
-    /** 过程表的提示条：跑的时候说"在跑"，跑完说"能选" */
+    /** 成绩单方向键连续按时逐级加速：1→2→4→8 条，上百条结果不用一格一格挪 */
+    private int cfMoveStep(boolean up) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (up == cfLastUp && now - cfLastMoveAt < 300) cfMoveStreak++;
+        else cfMoveStreak = 0;
+        cfLastMoveAt = now;
+        cfLastUp = up;
+        if (cfMoveStreak < 4) return 1;
+        if (cfMoveStreak < 9) return 2;
+        if (cfMoveStreak < 16) return 4;
+        return 8;
+    }
+
+    private void cfResetMoveStep() {
+        cfMoveStreak = 0;
+        cfLastMoveAt = 0;
+    }
+
+    /** 过程表的提示条：跑的时候说"在跑"，跑完分框态/条目态两句 */
     private String cfBoardHint() {
         if (cfRunning) return "正在测试 · ↑ 回页签 · ↓ 回按钮行";
         if (cfFinished && !cfResults.isEmpty()) {
-            return "↑↓ 选一条 · OK 写入 hosts · ↓ 按钮行";
+            if (cfEntered) {
+                return "第 " + (cfSel + 1) + " / " + cfResults.size() + " 条"
+                        + (cfResults.size() > 20 ? " · ↑↓ 浏览（长按加速）" : " · ↑↓ 浏览")
+                        + " · OK 写入 hosts · 返回 退回整个结果框";
+            }
+            return "OK 进入结果（共 " + cfResults.size() + " 条）· ↓ 直达「重新优选」· ↑ 回页签";
         }
         return "↑ 回页签 · ↓ 回按钮行";
     }
 
-    /** CF 按钮行按「上」去哪：跑完回成绩单（表里 ↑ 才是页签），否则回页签 */
+    /**
+     * CF 按钮行按「上」去哪：跑完回成绩单，并且直接进到条目（落在上次看的那一条），
+     * 因为从按钮行按上来就是想挑 IP；否则回页签。
+     */
     private void cfButtonRowUp() {
-        if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+        if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE
+                && !cfResults.isEmpty()) {
+            cfEntered = true;
+            cfResetMoveStep();
+            keepSelVisible();
+            cfLive.requestFocus();
+            return;
+        }
+        if (cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
+            cfEntered = false;
             cfLive.requestFocus();
             return;
         }
@@ -2356,7 +2669,7 @@ public class MainActivity extends Activity {
             });
         }
 
-        // 还没开始跑：表先立在那儿，说明下一步会发生什么（不然后台一片空白）
+        // 还没开始跑：不摆空表，给一句居中提示说明按下去会发生什么
         if (!review && livePhase.isEmpty()) {
             renderIdleBoard();
             return;
@@ -2366,36 +2679,49 @@ public class MainActivity extends Activity {
             renderResultGrid(lat);
             return;
         }
-        // 正常跑完却一条都没有（延迟全超时 / 测速全失败）：给一句人话，别摆空表
-        if (review && cfResults.isEmpty() && "speed".equals(phase)) {
+        // 正常跑完却一条都没有（延迟全超时 / 测速全失败）：给一句人话，别摆空表。
+        // 主动取消不算「没测到」——那会让人以为是网络不行，其实是他自己按停的；
+        // 取消时让流程继续往下走，把取消前扫到的过程留在表里。
+        if (review && cfResults.isEmpty() && "speed".equals(phase) && !cfCancelled) {
             renderEmptyResult();
             return;
         }
 
+        showLiveTable(true);
         if (sp != null) renderSpeedStage(review, sp, lat, done, total, last, banner, bannerAt);
         else if (lat != null) renderLatencyStage(review, lat, done, total, last);
         else renderSampleStage(review);
     }
 
-    /** 未开始：表先立住，告诉用户按下去会看到什么 */
+    /**
+     * 切换表骨架与空态占位。
+     * 空表（一堆「–」+ 空条 + 悬空的列头）在电视上会被读成"程序坏了"，
+     * 所以没数据就整个撤掉表格，把这句人话摆到中间。
+     */
+    private void showLiveTable(boolean table) {
+        if (liveHeadRow != null) liveHeadRow.setVisibility(table ? View.VISIBLE : View.GONE);
+        if (liveScroll != null) liveScroll.setVisibility(table ? View.VISIBLE : View.GONE);
+        if (cfIdleBox != null) cfIdleBox.setVisibility(table ? View.GONE : View.VISIBLE);
+    }
+
+    /** 未开始：不画表格，居中说清按下去会发生什么 */
     private void renderIdleBoard() {
         cfLiveTitle.setText("优选过程");
         cfLiveStat.setText("");
-        setLiveHead(true, true);
-        for (LiveRow r : liveRows) blankLiveRow(r);
-        cfLiveFoot.setText("点下方「开始优选」：先采样 CF 网段，再逐个测延迟、给最快的几条测下载速度");
+        showLiveTable(false);
+        cfIdleTitle.setText("还没开始优选");
+        cfIdleText.setText("按下方「开始优选」：先采样 CF 网段，再逐个测延迟，\n最后给最快的几条测下载速度");
+        cfLiveFoot.setText("跑起来之后，测过的 IP 会一条条实时出现在这里");
     }
 
-    /** 空态：跑完了，但一条可用 IP 都没有 */
+    /** 空态：跑完了，但一条可用 IP 都没有（同样不摆空表） */
     private void renderEmptyResult() {
         cfLiveTitle.setText("优选结果");
-        setLiveHead(false, false);
         cfLiveStat.setText("0 条");
-        for (LiveRow r : liveRows) {
-            blankLiveRow(r);
-            r.root.setBackground(null);
-        }
-        cfLiveFoot.setText("这次没测到可用的 IP    ·    可以调大采样数量，或换个时段再试");
+        showLiveTable(false);
+        cfIdleTitle.setText("这次没测到可用的 IP");
+        cfIdleText.setText("这批 IP 延迟全超时、或下载没跑通。\n把「采样数量」调大些，或换个时段再试。");
+        cfLiveFoot.setText("可以调大采样数量，或换个时段再按「开始优选」");
     }
 
     /**
@@ -2418,6 +2744,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderResultGrid(List<CfOptimizer.Candidate> lat) {
+        showLiveTable(true);        // 有成绩单了，表格骨架摆回来
         int n = liveRows.size();
         if (cfSel >= cfResults.size()) cfSel = Math.max(0, cfResults.size() - 1);
         keepSelVisible();
@@ -2431,7 +2758,7 @@ public class MainActivity extends Activity {
             if (c.rttMs >= 0 && c.rttMs < bestRtt) bestRtt = c.rttMs;
         }
         cfLiveTitle.setText("优选结果");
-        setLiveHead(true, true);
+        setLiveHead(true, true, true);
         cfLiveStat.setText("共 " + cfResults.size() + " 条"
                 + (withSpeed < cfResults.size() ? "（" + (cfResults.size() - withSpeed) + " 条仅延迟可用）" : "")
                 + (fastest > 0 ? "   ·   最快 " + String.format("%.1f Mbps", fastest) : ""));
@@ -2441,7 +2768,8 @@ public class MainActivity extends Activity {
             int pos = cfWinFrom + i;
             if (pos >= cfResults.size()) { blankLiveRow(r); continue; }
             CfOptimizer.Candidate c = cfResults.get(pos);
-            boolean selected = pos == cfSel;
+            // 框态下不亮任何一行：亮块在整块卡片上（卡片边框），行上再亮一块就两个焦点了
+            boolean selected = pos == cfSel && cfEntered;
             // 光标行走「亮块」：深色主题下这块是纯白底，行里原来的亮色文字压上去直接看不见
             // （之前 IP 白色压白色，选中反而糊成一片）。hot 状态下所有文字/色条都换成压深版。
             boolean hot = selected && cfBoardFocused;
@@ -2451,6 +2779,9 @@ public class MainActivity extends Activity {
             r.rank.setBackground(hot ? Skin.badgeOnFocus(th) : Skin.badge(th, false));
             r.ip.setText(c.ip);
             r.ip.setTextColor(hot ? COLOR_ON_FOCUS : (c.mbps > 0 ? COLOR_TEXT : COLOR_HINT));
+            r.region.setText(c.regionShort());
+            r.region.setTextColor(hot ? COLOR_ON_FOCUS : COLOR_HINT);
+            r.region.setVisibility(View.VISIBLE);
             if (c.mbps > 0) {
                 r.metric.setText(String.format("%.1f Mbps", c.mbps));
                 r.metric.setTextColor(onBlock(COLOR_OK, hot));
@@ -2470,10 +2801,16 @@ public class MainActivity extends Activity {
             r.metric.setVisibility(View.VISIBLE);
         }
 
+        // 框态下不点名任何一条（没进条目就没有"选中"这回事），只说下一步怎么操作
+        if (!cfEntered) {
+            cfLiveFoot.setText("共 " + cfResults.size() + " 条    ·    OK 进入结果挑 IP    ·    ↓ 重新优选");
+            return;
+        }
         // 表尾说清"现在选中谁、按 OK 会发生什么"——回看/结果合一后，这是唯一的操作入口
         CfOptimizer.Candidate sel = cfResults.get(cfSel);
         cfLiveFoot.setText("选中 " + (cfSel + 1) + "/" + cfResults.size() + "    "
-                + sel.ip + "    ·    延迟 " + (sel.rttMs < 0 ? "—" : sel.rttMs + " ms")
+                + sel.ip + "    ·    " + sel.regionFull()
+                + "    ·    延迟 " + (sel.rttMs < 0 ? "—" : sel.rttMs + " ms")
                 + "    ·    " + (sel.mbps > 0 ? String.format("%.1f Mbps", sel.mbps) : "未测速")
                 + "    ·    OK 写入 hosts");
     }
@@ -2490,7 +2827,7 @@ public class MainActivity extends Activity {
             }
         }
         cfLiveTitle.setText(review ? "测试回顾 · 延迟扫描" : "实时测试 · 延迟扫描");
-        setLiveHead(true, false);
+        setLiveHead(true, true, false);
         cfLiveStat.setText("已测 " + done + (total > 0 ? " / " + total : "")
                 + "   ·   通 " + pass
                 + (best != Integer.MAX_VALUE ? "   ·   最快 " + best + " ms" : ""));
@@ -2525,6 +2862,9 @@ public class MainActivity extends Activity {
             if (c.rttMs < 0) {
                 r.ip.setText(c.ip);
                 r.ip.setTextColor(COLOR_HINT);
+                r.region.setText(c.regionShort());
+                r.region.setTextColor(COLOR_HINT);
+                r.region.setVisibility(View.VISIBLE);
                 r.lat.setText("超时");
                 r.lat.setTextColor(COLOR_HINT);
                 r.bar.setFillColor(COLOR_HINT);
@@ -2535,6 +2875,9 @@ public class MainActivity extends Activity {
                         : c.rttMs <= 180 ? COLOR_ACCENT : COLOR_HINT;
                 r.ip.setText(c.ip);
                 r.ip.setTextColor(COLOR_TEXT);
+                r.region.setText(c.regionShort());
+                r.region.setTextColor(COLOR_HINT);
+                r.region.setVisibility(View.VISIBLE);
                 r.lat.setText(c.rttMs + " ms");
                 r.lat.setTextColor(color);
                 r.bar.setFillColor(color);
@@ -2567,7 +2910,7 @@ public class MainActivity extends Activity {
             if (c.mbps != -2) measured++;
         }
         cfLiveTitle.setText(review ? "测试回顾 · 下载测速" : "实时测试 · 下载测速");
-        setLiveHead(true, true);
+        setLiveHead(true, true, true);
 
         List<CfOptimizer.Candidate> view;
         int seqFrom = 0;
@@ -2600,6 +2943,9 @@ public class MainActivity extends Activity {
             r.rank.setTextColor(review && i < 3 ? COLOR_ACCENT : COLOR_HINT);
             r.ip.setText(c.ip);
             r.ip.setTextColor(c.mbps == -2 ? COLOR_HINT : COLOR_TEXT);
+            r.region.setText(c.regionShort());
+            r.region.setTextColor(COLOR_HINT);
+            r.region.setVisibility(View.VISIBLE);
             if (c.mbps == -2) {
                 r.metric.setText("测速中…");
                 r.metric.setTextColor(COLOR_HINT);
@@ -2638,15 +2984,22 @@ public class MainActivity extends Activity {
     private void renderSampleStage(boolean review) {
         cfLiveTitle.setText(review ? "测试回顾 · 采样" : "实时测试 · 采样");
         cfLiveStat.setText("");
-        setLiveHead(false, false);
+        setLiveHead(false, false, false);
         for (LiveRow r : liveRows) blankLiveRow(r);
         cfLiveFoot.setText(review
                 ? "这次在采样阶段就结束了，没有可展示的测试记录"
                 : "从 Cloudflare 官方网段按大小加权随机取点…");
     }
 
-    /** 列头随阶段显隐：延迟阶段只有「延迟」，测速阶段「延迟 + 速度」 */
-    private void setLiveHead(boolean latOn, boolean speedOn) {
+    /**
+     * 列头随阶段显隐：延迟阶段「地区 + 延迟」，测速阶段「地区 + 延迟 + 速度」。
+     * 地区从延迟段就能显示（段归属在采样那一刻就定了），所以跟着 latOn 走。
+     */
+    private void setLiveHead(boolean regionOn, boolean latOn, boolean speedOn) {
+        if (liveHeadRegion != null) {
+            liveHeadRegion.setVisibility(regionOn ? View.VISIBLE : View.INVISIBLE);
+            liveHeadRegion.setText(regionOn ? "地区" : "");
+        }
         if (liveHeadLat != null) {
             liveHeadLat.setVisibility(latOn ? View.VISIBLE : View.INVISIBLE);
             liveHeadLat.setText(latOn ? "延迟" : "");
@@ -2663,6 +3016,9 @@ public class MainActivity extends Activity {
         r.rank.setTextColor(COLOR_HINT);
         r.rank.setBackground(Skin.badge(th, false));   // 别把光标行的胶囊样式带到空行上
         r.ip.setText("");
+        r.region.setText("");
+        r.region.setTextColor(COLOR_HINT);
+        r.region.setVisibility(View.VISIBLE);
         r.lat.setText("");
         r.lat.setTextColor(COLOR_HINT);
         r.lat.setVisibility(View.VISIBLE);
@@ -2693,7 +3049,8 @@ public class MainActivity extends Activity {
         TextView info = new TextView(this);
         styleText(info, COLOR_TEXT, 16);
         info.setText("优选 IP：" + c.ip + "   延迟 " + c.rttMs + "ms   "
-                + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速"));
+                + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速")
+                + "\n落点：" + c.regionFull());
         final EditText etDomain = new EditText(this);
         etDomain.setHint("要应用的域名");
         etDomain.setText(prefs.getString("lastDomain", ""));
@@ -2719,6 +3076,10 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) {
                 String domain = etDomain.getText().toString().trim();
                 if (domain.isEmpty()) { toast("域名为空"); return; }
+                if (!HostsManager.isValidDomain(domain)) {
+                    toast("域名无效，只能用字母、数字、. _ -");
+                    return;
+                }
                 prefs.edit().putString("lastDomain", domain).apply();
                 dlg.dismiss();
                 doUpsertAsync(domain, c.ip);
