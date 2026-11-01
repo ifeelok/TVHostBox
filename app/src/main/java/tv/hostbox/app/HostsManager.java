@@ -613,6 +613,19 @@ public final class HostsManager {
         return t.substring(0, end).trim();
     }
 
+    /**
+     * 读一份备份的全文（纯只读，一个字都不写）。
+     *
+     * 走 root cat 而不是直接 File 读：/sdcard 上的文件 App 未必有权限读，
+     * 而且备份目录里可能有别的 App 放的怪名文件，名字必须先进白名单再 cat。
+     */
+    public static String readBackup(String name) {
+        if (!isSafeBackupName(name)) return null;
+        RootShell.Result r = RootShell.run("cat \"" + BACKUP_DIR + "/" + name + "\" 2>/dev/null\n");
+        if (!r.ok) return null;
+        return r.output;
+    }
+
     /** 取用户给这份备份起的名字（没起过则空串） */
     public static String backupLabelOf(String name) {
         try {

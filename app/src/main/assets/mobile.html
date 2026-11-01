@@ -107,6 +107,18 @@
   .act.warn{background:rgba(239,83,80,.10);border-color:rgba(239,83,80,.24);color:var(--danger)}
   .act.warn:active{background:rgba(239,83,80,.28)}
   button.ghost.danger{color:var(--danger);border-color:rgba(239,83,80,.32)}
+  /* 备份项：上面一行是名字+按钮，点「看」把内容展开在这一项里 */
+  .item.bk{display:block;padding:0;overflow:hidden}
+  .bkrow{display:flex;align-items:center;gap:8px;padding:10px}
+  pre.raw{
+    margin:0;padding:10px;
+    border-top:1px solid var(--line);
+    background:#0A121D;color:#CFE0FF;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:12.5px;line-height:1.6;
+    white-space:pre;overflow:auto;-webkit-overflow-scrolling:touch;
+    max-height:40vh;
+  }
   .empty{
     text-align:center;color:var(--sub);font-size:13px;
     padding:22px 8px;line-height:1.8;
@@ -404,12 +416,31 @@
     }
 
     backups.forEach(function(b){
-      var li = el('li', 'item');
+      // 这一项本身当容器：上面一行是名字+按钮，点「看」时把内容挂在这一项里
+      var li = el('li', 'item bk');
+      var row = el('div', 'bkrow');
       var meta = el('div', 'meta');
       meta.appendChild(el('div', 'host', b.text));
-      li.appendChild(meta);
+      row.appendChild(meta);
 
       var acts = el('div', 'acts');
+
+      var view = el('button', 'act', '看');
+      view.setAttribute('aria-label', '查看 ' + b.text + ' 的内容');
+      view.addEventListener('click', function(){
+        var open = li.querySelector('pre.raw');
+        if (open){ open.remove(); view.textContent = '看'; return; }   // 再点一下收起
+        post('/api/backup/get', 'name=' + encodeURIComponent(b.name))
+          .then(function(txt){
+            var pre = document.createElement('pre');
+            pre.className = 'raw';
+            pre.textContent = txt && txt.length ? txt : '（这份备份是空的）';
+            li.appendChild(pre);
+            view.textContent = '收';
+          })
+          .catch(function(m){ toast(m.message || m, false); });
+      });
+      acts.appendChild(view);
 
       var restore = el('button', 'act', '恢复');
       restore.addEventListener('click', function(){
@@ -441,7 +472,8 @@
       });
       acts.appendChild(del);
 
-      li.appendChild(acts);
+      row.appendChild(acts);
+      li.appendChild(row);
       ul.appendChild(li);
     });
   }

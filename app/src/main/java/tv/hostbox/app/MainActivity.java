@@ -1506,20 +1506,97 @@ public class MainActivity extends Activity {
         }, "list-backups").start();
     }
 
-    /** 单份备份的操作菜单：恢复 / 改名 / 删除 */
+    /**
+     * 单份备份的操作菜单。
+     * 「查看内容」放第一项（打开就停在它上面）：想恢复之前总得先确认里面是什么，
+     * 而它只读不写，当默认项最安全。
+     */
     private void showBackupActionMenu(final String name, final String label) {
         newDialog()
                 .setTitle(label)
-                .setItems(new String[]{"恢复到这份", "改个名字（好认）", "删除这份"},
+                .setItems(new String[]{"查看内容", "恢复到这份", "改个名字（好认）", "删除这份"},
                         new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface d, int w) {
-                        if (w == 0) confirmRestoreBackup(name, label);
-                        else if (w == 1) showRenameBackupDialog(name);
+                        if (w == 0) showBackupContent(name, label);
+                        else if (w == 1) confirmRestoreBackup(name, label);
+                        else if (w == 2) showRenameBackupDialog(name);
                         else confirmDeleteBackup(name, label);
                     }
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /** 最多显示多少条：再多就是同一屏上下翻，弹窗里堆上百行反而看不清 */
+    private static final int BACKUP_SHOW_MAX = 120;
+
+    /**
+     * 备份内容排版：  3   104.25.51.1    emby-proxy.example.com
+     * （纯函数，好测；空文件、只有注释的情况都要说清，别开出来一片空白）
+     */
+    static String backupContentText(String raw) {
+        if (raw == null) return "";
+        if (raw.trim().isEmpty()) return "（这份备份是空的，一个字都没有）";
+        List<HostsManager.Entry> list = HostsManager.parse(raw);
+        StringBuilder sb = new StringBuilder();
+        if (list.isEmpty()) {
+            sb.append("（这份备份里没有解析条目，只有注释或空行）");
+        } else {
+            int n = Math.min(list.size(), BACKUP_SHOW_MAX);
+            for (int i = 0; i < n; i++) {
+                HostsManager.Entry e = list.get(i);
+                if (i > 0) sb.append('\n');
+                String no = String.valueOf(e.lineIndex + 1);
+                while (no.length() < 3) no = " " + no;      // 行号右对齐，IP 才对得齐
+                sb.append(no).append("   ").append(e.ip).append("    ").append(e.host);
+                if (e.comment != null && !e.comment.isEmpty()) {
+                    sb.append("    # ").append(e.comment);
+                }
+            }
+            if (list.size() > n) {
+                sb.append("\n… 后面还有 ").append(list.size() - n).append(" 条没显示");
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 看一份备份里到底有什么（只读，绝不写入） */
+    private void showBackupContent(final String name, final String label) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String raw = HostsManager.readBackup(name);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (raw == null) {
+                            toast("读不到这份备份（可能已经被删了）");
+                            return;
+                        }
+                        LinearLayout box = new LinearLayout(MainActivity.this);
+                        box.setOrientation(LinearLayout.VERTICAL);
+                        box.setPadding(us(30), us(10), us(30), us(4));
+
+                        android.widget.ScrollView sv = new android.widget.ScrollView(MainActivity.this);
+                        sv.setVerticalScrollBarEnabled(false);
+                        TextView tv = new TextView(MainActivity.this);
+                        tv.setText(backupContentText(raw));
+                        tv.setTextColor(COLOR_TEXT);
+                        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(15));
+                        tv.setTypeface(android.graphics.Typeface.MONOSPACE);
+                        tv.setLineSpacing(dp(6), 1f);
+                        sv.addView(tv, new android.widget.ScrollView.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT));
+                        box.addView(sv);
+
+                        newDialog()
+                                .setTitle(label)
+                                .setView(box)
+                                .setPositiveButton("关闭", null)
+                                .show();
+                    }
+                });
+            }
+        }, "read-backup").start();
     }
 
     /** 恢复前再问一次：恢复会直接覆盖 /system/etc/hosts */

@@ -233,6 +233,16 @@ public final class ConfigServer {
                 String err = HostsManager.renameBackup(name.trim(), label);
                 if (err == null) respond(s, 200, "text/plain; charset=utf-8", "已改名");
                 else respond(s, 500, "text/plain; charset=utf-8", err);
+            } else if ("POST".equals(method) && "/api/backup/get".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String name = f.get("name");
+                if (name == null) {
+                    respond(s, 400, "text/plain; charset=utf-8", "缺少 name");
+                    return;
+                }
+                String raw = HostsManager.readBackup(name.trim());
+                if (raw == null) respond(s, 404, "text/plain; charset=utf-8", "读不到这份备份");
+                else respond(s, 200, "text/plain; charset=utf-8", raw);
             } else if ("POST".equals(method) && "/api/backup/delete".equals(path)) {
                 Map<String, String> f = parseForm(body);
                 String name = f.get("name");
