@@ -827,14 +827,25 @@ public class MainActivity extends Activity {
     }
 
     private void doUpsertAsync(final String domain, final String ip) {
+        doUpsertAsync(domain, ip, null);
+    }
+
+    /**
+     * 写入一条解析。note 不为空时连着行尾注释一起写（优选信息就靠它留在 hosts 里），
+     * 为空则原来的注释不动。
+     */
+    private void doUpsertAsync(final String domain, final String ip, final String note) {
         toast("正在写入 " + domain + " → " + ip);
         new Thread(new Runnable() {
             @Override public void run() {
-                final String err = HostsManager.upsert(domain, ip);
+                final String err = HostsManager.upsert(domain, ip, note);
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         showActionResult(err == null,
-                                err == null ? "写入成功：" + domain + " → " + ip + "（原文件已备份）"
+                                err == null
+                                        ? "写入成功：" + domain + " → " + ip
+                                                + (note == null ? "（原文件已备份）"
+                                                                : "（优选信息已记在这行后面，原文件已备份）")
                                         : "写入失败：" + err);
                         loadHostsAsync();
                         if (hostsList != null) hostsList.focusEntered();
@@ -3278,10 +3289,16 @@ public class MainActivity extends Activity {
         info.setText("优选 IP：" + c.ip + "   延迟 " + c.rttMs + "ms   "
                 + (c.mbps > 0 ? String.format("%.1f Mbps", c.mbps) : "未测速")
                 + "\n落点：" + c.regionFull());
+        // 只算一次：弹窗上给用户看的、真正写进文件的，必须是同一段字
+        final String note = c.hostsNote(System.currentTimeMillis());
+        TextView tvNote = new TextView(this);
+        styleText(tvNote, COLOR_HINT, 13);
+        tvNote.setText("这行后面会记上：" + note);
         final EditText etDomain = new EditText(this);
         etDomain.setHint("要应用的域名");
         etDomain.setText(prefs.getString("lastDomain", ""));
         box.addView(info);
+        box.addView(tvNote);
         box.addView(etDomain);
         box.addView(buildDomainPicker(etDomain));
 
@@ -3309,7 +3326,9 @@ public class MainActivity extends Activity {
                 }
                 prefs.edit().putString("lastDomain", domain).apply();
                 dlg.dismiss();
-                doUpsertAsync(domain, c.ip);
+                // 把「这是哪台机器、延迟多少」写进行尾注释：hosts 里光有 IP，
+                // 过两天谁也说不清这串数字是哪次优选留下的
+                doUpsertAsync(domain, c.ip, note);
             }
         });
     }

@@ -272,8 +272,20 @@ public final class HostsManager {
      * @return null=成功
      */
     public static String upsert(String domain, String ip) {
+        return upsert(domain, ip, null);
+    }
+
+    /**
+     * 同上，但顺手把这行原来的行尾注释换成 note（null = 原来的注释不动）。
+     *
+     * 优选写进来的注释是要能看懂的：「这串数字是哪台机器、多少延迟」，
+     * 光靠 IP 谁也记不住。手动改 IP 时不传 note，用户自己的备注就不会被抹掉。
+     *
+     * @return null=成功
+     */
+    public static String upsert(String domain, String ip, String note) {
         try {
-            return writeRaw(upsertText(readRaw(), domain, ip));
+            return writeRaw(upsertText(readRaw(), domain, ip, note));
         } catch (Exception e) {
             return e.toString();
         }
@@ -287,6 +299,16 @@ public final class HostsManager {
      * 这里不碰任何文件/IO，输入输出都是字符串。
      */
     static String upsertText(String raw, String domain, String ip) {
+        return upsertText(raw, domain, ip, null);
+    }
+
+    /**
+     * 同上，多一个 note：
+     *  - note == null  → 保留原注释（手动改 IP 走这条，别把用户的备注吃掉）
+     *  - note != null  → 把这行的行尾注释换成 "# note"（重新优选时连延迟一起更新）
+     * 位置不同、IP 不同、注释不同，三样都没变就一个字节都不动。
+     */
+    static String upsertText(String raw, String domain, String ip, String note) {
         StringBuilder sb = new StringBuilder();
         boolean replaced = false;    // 已在独占行上改好，末尾不用再补
         boolean movedOut = false;    // 目标域名是从共享行摘出来的，末尾必须补一条
@@ -317,12 +339,14 @@ public final class HostsManager {
             }
             if (replaced) continue;   // 同域名的重复行整行丢弃，全文只留一条
             if (parts.length == 2) {
-                // 独占一行：原地换 IP，位置和注释都不动（已经是目标值就一字不改）
-                if (parts[0].equals(ip)) {
-                    sb.append(line).append('\n');
+                // 独占一行：原地换 IP（和注释），位置不动
+                String oldTail = comment == null ? "" : comment;
+                String newTail = note == null ? oldTail : "# " + note;
+                if (parts[0].equals(ip) && newTail.equals(oldTail)) {
+                    sb.append(line).append('\n');        // 已经是目标值，一字不改
                 } else {
                     sb.append(ip).append("  ").append(domain)
-                            .append(comment == null ? "" : "  " + comment).append('\n');
+                            .append(newTail.isEmpty() ? "" : "  " + newTail).append('\n');
                 }
                 // 这一行已经处理掉了，末尾绝不能再补一条——漏了这句就会每次改 IP 都多一行
                 replaced = true;
@@ -334,7 +358,8 @@ public final class HostsManager {
             }
         }
         if (!replaced || movedOut) {
-            sb.append(ip).append("  ").append(domain).append('\n');
+            sb.append(ip).append("  ").append(domain)
+                    .append(note == null || note.isEmpty() ? "" : "  # " + note).append('\n');
         }
         return sb.toString();
     }

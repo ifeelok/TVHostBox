@@ -7,11 +7,14 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -138,6 +141,33 @@ public final class CfOptimizer {
         }
 
         @Override public String toString() { return ip; }
+
+        /**
+         * 写进 hosts 行尾注释的一段说明：
+         *   CF优选 美国·洛杉矶(LAX) · 23ms · 18.2Mbps · 11-01 18:30
+         *
+         * 位置用紧凑写法（国家·城市(三字码)）：这行字会跟着 IP 显示在电视列表的副行里，
+         * 横向空间很紧；中间那些 " · " 是用来分段的，位置里就不要再夹一层空格。
+         * 没测到的项直接不写——「23ms · 未测速」不如干脆不出现。
+         */
+        public String hostsNote(long nowMs) {
+            StringBuilder sb = new StringBuilder("CF优选 ");
+            sb.append(regionNote());
+            if (rttMs > 0) sb.append(" · ").append(rttMs).append("ms");
+            if (mbps > 0) sb.append(" · ").append(String.format(Locale.US, "%.1fMbps", mbps));
+            sb.append(" · ").append(new SimpleDateFormat("MM-dd HH:mm", Locale.US)
+                    .format(new Date(nowMs)));
+            return sb.toString();
+        }
+
+        /** 「美国·洛杉矶(LAX)」/「美国·旧金山」/「LAX」/「位置未知」——注释用的紧凑位置 */
+        public String regionNote() {
+            String c = countryName(), city = cityName();
+            String s = (c == null || c.isEmpty() || "未知".equals(c)) ? "" : c;
+            if (city != null && !city.isEmpty()) s = s.isEmpty() ? city : s + "·" + city;
+            if (colo != null && !colo.isEmpty()) s = s.isEmpty() ? colo : s + "(" + colo + ")";
+            return s.isEmpty() ? "位置未知" : s;
+        }
     }
 
     /** IP 落在哪个 CF 段；不在官方段里返回 -1 */

@@ -188,7 +188,10 @@ public final class ConfigServer {
                     respond(s, 400, "text/plain; charset=utf-8", "域名无效：" + domain);
                     return;
                 }
-                String err = HostsManager.upsert(domain.trim(), ip.trim());
+                // note 可选：带了就写进行尾注释（手机端也能顺手记一句），不带就保留原注释
+                String note = f.get("note");
+                String err = HostsManager.upsert(domain.trim(), ip.trim(),
+                        note == null || note.trim().isEmpty() ? null : note.trim());
                 if (err == null) {
                     respond(s, 200, "text/plain; charset=utf-8", "已保存");
                     notifyDataChanged();
