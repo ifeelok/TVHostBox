@@ -42,6 +42,8 @@ public final class HostsManager {
     private static final int LABEL_MAX = 24;
     /** 恢复前的自动备份，名字上挂的标记 */
     private static final String BEFORE_RESTORE = ".before_restore";
+    /** 老版本用的是下划线：hosts.bak.20261101_175409_before_restore，盒子上现在还躺着 */
+    private static final String BEFORE_RESTORE_OLD = "_before_restore";
     private static final Object SEQ_LOCK = new Object();
     /** 拿不到 prefs 时的序号兜底（保证同一秒也不会生成两个同名文件） */
     private static final java.util.concurrent.atomic.AtomicInteger SEQ_FALLBACK =
@@ -90,7 +92,9 @@ public final class HostsManager {
             this.entries = entries;
             this.seq = parseSeq(name);
             this.timeMs = parseTimeMs(name);
-            this.beforeRestore = name.endsWith(BEFORE_RESTORE);
+            // 老备份用的是下划线那一版，只认 dot 会让老文件全变成普通备份
+            this.beforeRestore = name.endsWith(BEFORE_RESTORE)
+                    || name.endsWith(BEFORE_RESTORE_OLD);
         }
     }
 
@@ -406,14 +410,44 @@ public final class HostsManager {
      * 会把空行也算进去（实测 10 行的文件数出 10），必须把两个条件合成一个 ERE 模式。
      */
     public static List<Backup> listBackupsDetail() {
+        List<Backup> out = parseBackupList(RootShell.run(backupListScript()).output);
+        // 用户起的显示名（拿不到 prefs 就只是没名字，不影响列表）
+        try {
+            SharedPreferences sp = prefs();
+            for (int i = 0; i < out.size(); i++) {
+                Backup b = out.get(i);
+                String l = sp.getString(PREF_BACKUP_LABEL + b.name, null);
+                if (l != null && !l.isEmpty()) b.label = l;
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    /**
+     * 列备份的那段 shell：每行一条 `BK|文件名|条数`。
+     * 单独抽出来是为了能在电脑上把这段原文交给真 shell 跑一遍（测试里就是这么干的）。
+     *
+     * 条数那半截必须**写在外面**：
+     * `echo "…|$(grep -c … \"$f\")"` 里 `\` 会原样带进内层命令，grep 收到的文件名
+     * 就变成带引号的 `"hosts.bak.xxx"` → No such file → 输出为空 → 条数一路掉成 -1。
+     * （bash、mksh、盒子上那个 sh 全一样，这是 POSIX 的转义规则，不是哪个 shell 的怪癖。）
+     * 把 `$(...)` 挪到引号外面，里头的 `"$f"` 就是最普通的一层引号，再也咬不到人。
+     */
+    static String backupListScript() {
+        return "cd " + BACKUP_DIR + " 2>/dev/null\n"
+             + "ls -1t | grep '^hosts\\.bak\\.' | while read f; do\n"
+             + "  echo \"BK|$f|\"$(grep -cvE '^(#|$)' \"$f\")\n"
+             + "done\n";
+    }
+
+    /**
+     * 把 shell 输出变成备份列表（含排序）。
+     * 输出里可能夹着别的脏东西，所以只收 BK| 开头的行，条数读不出来就记 -1。
+     */
+    static List<Backup> parseBackupList(String output) {
         List<Backup> out = new ArrayList<Backup>();
-        String script =
-            "cd " + BACKUP_DIR + " 2>/dev/null\n" +
-            "ls -1t | grep '^hosts\\.bak\\.' | while read f; do\n" +
-            "  echo \"BK|$f|$(grep -cvE '^(#|$)' \\\"$f\\\")\"\n" +
-            "done\n";
-        RootShell.Result r = RootShell.run(script);
-        for (String line : r.output.split("\n")) {
+        if (output == null || output.isEmpty()) return out;
+        for (String line : output.split("\n")) {
             String t = line.trim();
             if (!t.startsWith("BK|")) continue;
             String[] p = t.split("\\|");
@@ -426,14 +460,6 @@ public final class HostsManager {
             }
             out.add(new Backup(name, n));
         }
-        try {
-            SharedPreferences sp = prefs();
-            for (int i = 0; i < out.size(); i++) {
-                Backup b = out.get(i);
-                String l = sp.getString(PREF_BACKUP_LABEL + b.name, null);
-                if (l != null && !l.isEmpty()) b.label = l;
-            }
-        } catch (Exception ignored) {}   // 拿不到 prefs 就只是没显示名
         sortBackups(out);
         return out;
     }
