@@ -57,6 +57,7 @@ public class MainActivity extends Activity {
     private Button btnQrRefresh;
     private Button btnQrService;
     private Button btnHostsRefresh;
+    private Button btnHostsCheck;
     private Button btnHostsAdd;
     private Button[] hostsButtonRow;
     /** 记录光标最后停在按钮行的哪一枚：从列表按「下」回到它，而不是每次都从第一个开始 */
@@ -663,6 +664,11 @@ public class MainActivity extends Activity {
         btnHostsRefresh = actionButton("刷新", Icons.REFRESH, new View.OnClickListener() {
             @Override public void onClick(View v) { loadHostsAsync(); }
         });
+        // 体检排在「刷新」旁边：都是「看一下现在什么情况」，不是改动
+        btnHostsCheck = actionButton("体检", Icons.CHECK, new View.OnClickListener() {
+            @Override public void onClick(View v) { startHostCheck(); }
+        });
+        btnHostsCheck.setContentDescription("OK 逐个连一下，看哪些地址还不通 · ←→ 换一个按钮");
         Button btnBackup = actionButton("备份", Icons.CLOCK, new View.OnClickListener() {
             @Override public void onClick(View v) { showBackupList(); }
         });
@@ -670,7 +676,7 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { showSettingsDialog(); }
         });
         // 「检查更新」挪进设置弹窗（整页重排后它有了固定座位）：按钮行只留这一页最高频的四件事
-        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnBackup, btnSettings};
+        hostsButtonRow = new Button[]{btnAdd, btnHostsRefresh, btnHostsCheck, btnBackup, btnSettings};
         addButtons(buttons, hostsButtonRow);
         wireButtonRow(hostsButtonRow, hostsList);
 
@@ -704,6 +710,63 @@ public class MainActivity extends Activity {
                 }
             }
         }, "load-hosts").start();
+    }
+
+    // ==================== 体检 ====================
+
+    /**
+     * 把当前 entries 里的地址挨个连一下，看还活着没。
+     *
+     * 只读：一个字节都不写。真要处理不通的条目，还是走列表里那条「删除」，
+     * 二次确认那套照旧——体检不该顺手改东西。
+     */
+    private void startHostCheck() {
+        if (entries == null || entries.isEmpty()) {
+            toast("还没有可体检的条目");
+            return;
+        }
+        final List<HostsManager.Entry> snapshot = new ArrayList<HostsManager.Entry>(entries);
+        final int addrCount = HostCheck.group(snapshot).size();
+        toast("正在体检 " + addrCount + " 个地址…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final List<HostCheck.Result> res = HostCheck.run(snapshot);
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (uiGone()) return;
+                        showHostCheckReport(res);
+                    }
+                });
+            }
+        }, "host-check").start();
+    }
+
+    /**
+     * 体检报告。用 setItems 而不是自绘行：长列表在电视上靠方向键上下翻，
+     * 原生列表自带这个行为；自绘的 TextView 列表翻不动，那才是真难受。
+     */
+    private void showHostCheckReport(final List<HostCheck.Result> res) {
+        if (uiGone()) return;
+        if (res.isEmpty()) {
+            toast("没有可体检的条目");
+            return;
+        }
+        final List<HostCheck.Result> sorted = HostCheck.sortForReport(res);
+        String[] items = new String[sorted.size()];
+        for (int i = 0; i < sorted.size(); i++) {
+            // ✕ 打头标出不通的：这一列一眼扫下去就知道有几条红的
+            items[i] = (sorted.get(i).ok() ? "·  " : "✕  ") + HostCheck.line(sorted.get(i));
+        }
+        newDialog()
+                .setTitle("体检 · " + HostCheck.summary(sorted))
+                .setItems(items, null)     // 纯报告，点哪条都不改东西
+                .setNeutralButton("再测一次", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        startHostCheck();
+                    }
+                })
+                .setNegativeButton("关闭", null)
+                .show();
     }
 
     private void checkRootAsync() {

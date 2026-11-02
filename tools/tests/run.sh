@@ -49,6 +49,11 @@ for api in 34 33 30 28; do
         break
     fi
 done
+# 本机没有上面那几个就先找任意一个：CI 的 runner 装哪些平台不受我们控制，
+# 为了一个 jar 让整条流水线红掉不值当（jar 只是提供 android.* 的签名，版本新一点不影响）
+if [ -z "$JAR" ] && [ -d "$SDK/platforms" ]; then
+    JAR=$(ls -d "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
+fi
 if [ -z "$JAR" ]; then
     echo "找不到 android.jar。装个 Android SDK platform，或者设 ANDROID_SDK_ROOT 指过去。"
     echo "（找过：$SDK/platforms/android-*/android.jar）"

@@ -8,7 +8,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 逻辑测试单独一个 job：跟编译并行跑，十几秒就出结果。
+  # 电视上的操作没法自动化，但「算错了」可以——这个 job 红了就别指望 APK 是对的。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run logic tests
+        run: ./tools/tests/run.sh
+
   build:
+    # 测试挂了就别打包、更别发 Release：宁可多等二十秒，也别发一个算错东西的版本
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 打 tag 时需要创建 Release 并上传 APK
