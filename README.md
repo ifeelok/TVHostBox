@@ -289,6 +289,15 @@ anycast 入口），DNS 有时会给你一个连不上的，App 就卡在超时�
 gradle assembleRelease
 ```
 
+逻辑测试（不需要 Android Studio，也不需要连盒子）：
+
+```bash
+./tools/tests/run.sh
+```
+
+七个测试类、一百多条断言，调的都是 App 里的**真方法**（不是复制一份逻辑来测），
+包括把写入/恢复脚本交给真 `/bin/sh` 在临时目录里跑一遍。细节见 `tools/tests/README.md`。
+
 ## 目录结构
 
 ```
@@ -297,9 +306,11 @@ app/src/main/java/tv/hostbox/app/
 ├── HostsManager.java    # hosts 解析 / 校验 / root 写入 / 备份恢复
 ├── RootShell.java       # 常驻 su 会话（零依赖版 libsu）
 ├── ConfigServer.java    # 手机扫码配置的 HTTP 服务（/api/state /api/set /api/delete）
-└── CfOptimizer.java     # Cloudflare 优选（延迟 + 下载测速，裸 SSLSocket 手写请求）
+├── CfOptimizer.java     # Cloudflare 优选（延迟 + 下载测速，裸 SSLSocket 手写请求）
+└── RawAccel.java        # GitHub raw 加速（测 4 个 Fastly 地址，钉最快的）
 app/src/main/assets/mobile.html          # 手机端配置页（自成一体，不依赖任何 CDN）
 app/src/main/java/io/nayuki/qrcodegen/   # QR 码生成（Nayuki, MIT）
+tools/tests/                             # 纯逻辑测试（./tools/tests/run.sh）
 ```
 
 ## 兼容性
