@@ -921,6 +921,13 @@ public class MainActivity extends Activity {
                 new int[]{2, 6, 12},
                 PREF_CF_DOWNLOAD_MB, 6);
 
+        settingsSection(box, "GitHub 加速", false);
+        // 只在需要时用：别的 App 拉 raw 订阅慢/转圈时，点一下把解析钉到实测能连的地址
+        settingRow(box, "GitHub raw / gist 加速", RawAccel.stateText(),
+                new View.OnClickListener() {
+            @Override public void onClick(View v) { showRawAccelDialog(); }
+        });
+
         settingsSection(box, "应用", false);
         settingRow(box, "检查更新", "当前 v" + appVersion(), new View.OnClickListener() {
             @Override public void onClick(View v) { checkUpdateAsync(false); }
@@ -1142,6 +1149,109 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    // ==================== GitHub raw 加速 ====================
+
+    /**
+     * 给 raw / gist 钉一个实测能连的 IP。
+     *
+     * 只解决「解析到的地址连不上」——别的 App 拉订阅转圈，多半是这一环。
+     * 如果钉完还是慢，那是链路问题，钉 hosts 帮不上，得换镜像前缀或走代理（弹窗里会直说）。
+     */
+    private void showRawAccelDialog() {
+        if (uiGone()) return;
+        TextView info = new TextView(this);
+        styleText(info, COLOR_TEXT, 16);
+        info.setText("raw.githubusercontent.com 和 gist.githubusercontent.com 只有 4 个地址"
+                + "（Fastly 的 anycast 入口）。DNS 可能给你一个连不上的，"
+                + "App 就卡在超时上——这就是「有时候特别慢」最常见的原因。\n\n"
+                + "点「测速并写入」：连这四个地址的 443 端口，挑最快的写进 hosts，"
+                + "顺带在行尾记上测速时间和延迟。\n\n"
+                + "注意：这只治「连不上 / 连错」，不治「不够快」。四个地址是同一张网络的"
+                + "不同门牌号，彼此速度差不多；如果钉完还慢，说明是链路被拦，"
+                + "得改用镜像地址或代理。");
+        info.setLineSpacing(dp(3), 1f);
+        info.setPadding(dp(24), dp(8), dp(24), dp(4));
+
+        final AlertDialog dlg = newDialog()
+                .setTitle("GitHub raw 加速")
+                .setView(info)
+                .setPositiveButton("测速并写入", null)
+                .setNeutralButton("撤掉", null)
+                .setNegativeButton("关闭", null)
+                .create();
+        styleDialog(dlg);
+        dlg.show();
+        dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                dlg.dismiss();
+                startRawAccel();
+            }
+        });
+        dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                dlg.dismiss();
+                startRawAccelClear();
+            }
+        });
+    }
+
+    private void startRawAccel() {
+        toast("正在测四个候选地址…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final RawAccel.Pick p = RawAccel.measure();
+                final String err = RawAccel.apply(p);
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (uiGone()) return;
+                        loadHostsAsync();
+                        if (err != null) {
+                            showSimpleDialog("没测通",
+                                    "四个候选地址都连不上，或者写入失败了。\n\n" + err
+                                            + "\n\n这通常说明是链路被拦（不是解析问题），"
+                                            + "钉 hosts 帮不上忙——改用镜像地址（订阅地址前面加 "
+                                            + "https://gh-proxy.com/ ）或走代理更实在。");
+                            return;
+                        }
+                        showSimpleDialog("已加速",
+                                "raw 和 gist 都钉到 " + p.ip + "（" + p.rttMs + "ms）。\n\n"
+                                        + "现在去重启一下正在用的那个 App——Android 会把 DNS 结果"
+                                        + "缓存一阵子，不重启可能还是走老地址。\n\n"
+                                        + "如果重启后还是慢：说明不是解析的问题，"
+                                        + "这条链路本身被干扰了，得换镜像地址或走代理。");
+                    }
+                });
+            }
+        }, "raw-accel").start();
+    }
+
+    private void startRawAccelClear() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String err = RawAccel.clear();
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (uiGone()) return;
+                        loadHostsAsync();
+                        showActionResult(err == null, err == null ? "已撤掉 GitHub raw 加速" : err);
+                    }
+                });
+            }
+        }, "raw-accel-clear").start();
+    }
+
+    /** 一句话结果的弹窗（只有一个「知道了」），动作完成后用 */
+    private void showSimpleDialog(String title, String msg) {
+        if (uiGone()) return;
+        AlertDialog d = newDialog()
+                .setTitle(title)
+                .setMessage(msg)
+                .setPositiveButton("知道了", null)
+                .create();
+        styleDialog(d);
+        d.show();
     }
 
     // ==================== 检查升级 ====================

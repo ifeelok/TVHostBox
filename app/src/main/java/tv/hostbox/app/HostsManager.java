@@ -329,6 +329,46 @@ public final class HostsManager {
     }
 
     /**
+     * 一次把多个域名指到同一个 IP（读改写只做一遍，只产生一份备份）。
+     *
+     * 为什么不是循环调 upsert：那样 raw 和 gist 各写一次，就多出两份备份，
+     * 备份列表里一夜之间多出几十份「v37 · 3 条」谁也看不懂。
+     */
+    public static String upsertMany(String[] domains, String ip, String note) {
+        if (domains == null || domains.length == 0) return "没有要写入的域名";
+        synchronized (RW_LOCK) {
+            try {
+                String raw = readRaw();
+                for (int i = 0; i < domains.length; i++) {
+                    raw = upsertText(raw, domains[i], ip, note);
+                }
+                return writeRaw(raw);
+            } catch (Exception e) {
+                return e.toString();
+            }
+        }
+    }
+
+    /** 一次删掉多个域名（同样只写一次、只备份一份） */
+    public static String removeMany(String[] domains) {
+        if (domains == null || domains.length == 0) return "没有要删除的域名";
+        synchronized (RW_LOCK) {
+            try {
+                String raw = readRaw();
+                boolean any = false;
+                for (int i = 0; i < domains.length; i++) {
+                    String next = removeText(raw, domains[i]);
+                    if (next != null) { raw = next; any = true; }
+                }
+                if (!any) return "没有找到要删除的条目";
+                return writeRaw(raw);
+            } catch (Exception e) {
+                return e.toString();
+            }
+        }
+    }
+
+    /**
      * 纯文本变换：把 raw 里 domain 的解析改成 ip（原来没有就追加到末尾）。
      *
      * 从 IO 里抽出来是为了能单测——以前测试是把这段逻辑复制一份去测，
