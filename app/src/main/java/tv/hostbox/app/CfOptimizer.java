@@ -360,8 +360,13 @@ public final class CfOptimizer {
         }
         pool.shutdown();
         while (!pool.isTerminated()) {
-            checkCancelled();
-            if (cancelled) pool.shutdownNow();
+            // 顺序要紧：先掐线程池，再由 checkCancelled 抛出去。
+            // 反过来写的话 checkCancelled 先抛异常直接跳出循环，
+            // 下面的 shutdownNow 就永远执行不到（之前就是这么写的，属于死代码）。
+            if (cancelled) {
+                pool.shutdownNow();
+                checkCancelled();
+            }
             Thread.sleep(100);
         }
         progress.onProgress("latency", ips.size(), ips.size(), "存活 " + latencyOk.size() + " 个");
@@ -408,8 +413,11 @@ public final class CfOptimizer {
         pool2.shutdown();
         pool3.shutdown();
         while (!pool2.isTerminated() || !pool3.isTerminated()) {
-            checkCancelled();
-            if (cancelled) { pool2.shutdownNow(); pool3.shutdownNow(); }
+            if (cancelled) {          // 同上：先 shutdownNow，再让 checkCancelled 抛
+                pool2.shutdownNow();
+                pool3.shutdownNow();
+                checkCancelled();
+            }
             Thread.sleep(100);
         }
 

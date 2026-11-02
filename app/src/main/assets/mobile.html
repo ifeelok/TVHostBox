@@ -391,7 +391,12 @@
   function post(path, body){
     return fetch(path, {
       method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      // X-HostBox 是写操作的通行证：设备端只认带这个头的 POST。
+      // 别的网页（跨站表单）发不出自定义头，也就改不了你的 hosts。
+      headers:{
+        'Content-Type':'application/x-www-form-urlencoded',
+        'X-HostBox':'1'
+      },
       body:body
     }).then(function(r){
       return r.text().then(function(t){

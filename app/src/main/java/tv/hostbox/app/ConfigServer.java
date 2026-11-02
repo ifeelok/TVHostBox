@@ -129,11 +129,18 @@ public final class ConfigServer {
             String requestLine = headLines[0];
             if (requestLine == null || requestLine.isEmpty()) return;
 
-            int contentLength = 0;
+            Map<String, String> headers = new HashMap<String, String>();
             for (int i = 1; i < headLines.length; i++) {
                 int c = headLines[i].indexOf(':');
-                if (c > 0 && headLines[i].substring(0, c).trim().equalsIgnoreCase("Content-Length")) {
-                    try { contentLength = Integer.parseInt(headLines[i].substring(c + 1).trim()); }
+                if (c > 0) {
+                    headers.put(headLines[i].substring(0, c).trim().toLowerCase(java.util.Locale.US),
+                            headLines[i].substring(c + 1).trim());
+                }
+            }
+            int contentLength = 0;
+            for (Map.Entry<String, String> h : headers.entrySet()) {
+                if (h.getKey().equals("content-length")) {
+                    try { contentLength = Integer.parseInt(h.getValue()); }
                     catch (Exception ignored) {}
                 }
             }
@@ -152,6 +159,13 @@ public final class ConfigServer {
             String method = parts[0];
             String path = parts.length > 1 ? parts[1] : "/";
             if (path.contains("?")) path = path.substring(0, path.indexOf('?'));
+
+            // 写操作必须有自定义头，见 writeAllowed 的注释
+            if (!writeAllowed(method, headers)) {
+                respond(s, 403, "text/plain; charset=utf-8",
+                        "拒绝：写操作需要 X-HostBox 请求头（防止别的网页跨站改写 hosts）");
+                return;
+            }
 
             if ("GET".equals(method) && "/".equals(path)) {
                 respond(s, 200, "text/html; charset=utf-8", mobilePage());
@@ -270,8 +284,29 @@ public final class ConfigServer {
         }
     }
 
-    private static Map<String, String> parseForm(String body) {
-        Map<String, String> map = new HashMap<String, String>();
+    /** 写操作的通行头：网页里由 fetch 带上，普通 HTML 表单发不出来 */
+    static final String CSRF_HEADER = "x-hostbox";
+
+    /**
+     * 这个请求能不能改 hosts / 备份。
+     *
+     * 为什么要这么一道：手机浏览器打开任意一个网页，那网页里的一个表单就能
+     * POST 到 http://盒子IP:18123/api/raw，把 hosts 全文换掉——跨站表单不受 CORS 限制，
+     * 也不需要读到响应，属于「用户什么都没干，hosts 就变了」。
+     * 加 PIN 太重（用户已否），改成要求一个自定义请求头：
+     *  - 普通 form / img 标签发不出自定义头 → 直接挡掉；
+     *  - 跨站 fetch 带自定义头会先发 OPTIONS 预检，我们从不回应预检 → 浏览器不发出正式请求；
+     *  - 自己用页面或脚本时带上这个头就行，日常使用完全无感。
+     * GET 是只读（跨站读不到响应内容），不设这道门。
+     */
+    static boolean writeAllowed(String method, Map<String, String> headers) {
+        if (method == null || !"POST".equalsIgnoreCase(method)) return true;
+        if (headers == null) return false;
+        String v = headers.get(CSRF_HEADER);
+        return v != null && !v.isEmpty();
+    }
+
+    private static Map<String, String> parseForm(String body) {        Map<String, String> map = new HashMap<String, String>();
         if (body == null) return map;
         for (String pair : body.split("&")) {
             int eq = pair.indexOf('=');

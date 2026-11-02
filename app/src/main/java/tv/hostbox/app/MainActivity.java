@@ -154,6 +154,8 @@ public class MainActivity extends Activity {
 
     /** 主线程渲染句柄：过程回调非常密集（采样 320 个 IP），必须限流后再画 */
     private final Handler ui = new Handler(Looper.getMainLooper());
+    /** onDestroy 之后置位：后台线程回来的回调看到它就什么都不做（见 uiGone） */
+    private volatile boolean gone;
     private final Runnable liveRenderTask = new Runnable() {
         @Override public void run() {
             liveRenderQueued = false;
@@ -314,8 +316,28 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        gone = true;
+        // 还没跑的回调一律作废：它们大多会弹窗（更新下载完成、写 hosts 结果、手机端改动提醒），
+        // Activity 已经销毁时 Dialog.show() 会抛 BadTokenException —— 整个 App 当场崩掉
+        ui.removeCallbacksAndMessages(null);
+        // 正在跑的优选也要掐掉：它还握着几十个 socket，且回调指向的视图已经没了
+        CfOptimizer running = cfOpt;
+        if (running != null) running.cancel();
+        cfRunning = false;
         super.onDestroy();
         ConfigServer.stop();
+    }
+
+    /**
+     * 后台线程回到主线程时先问一句「界面还在吗」。
+     *
+     * 这个 App 里所有耗时活（读 hosts、写 hosts、CF 测速、检查更新）都在子线程，
+     * 干完都往主线程 post 一段 UI 代码。用户在等待时按 HOME 退出、或系回收掉 Activity，
+     * 那些代码照样会执行——碰视图没事，弹对话框就会崩（WindowManager$BadTokenException）。
+     */
+    private boolean uiGone() {
+        if (gone || isFinishing()) return true;
+        return android.os.Build.VERSION.SDK_INT >= 17 && isDestroyed();
     }
 
     @Override
@@ -1129,6 +1151,7 @@ public class MainActivity extends Activity {
      *               false = 用户主动点「检查更新」，所有结果都要有反馈
      */
     private void checkUpdateAsync(final boolean silent) {
+        if (uiGone()) return;      // 开机后 3.5s 的自动检查：这中间界面可能已经被回收
         if (updateChecking) {
             if (!silent) toast("正在检查中…");
             return;
@@ -1192,6 +1215,7 @@ public class MainActivity extends Activity {
      * 这里给一枚「打开发布页」，能唤起系统浏览器/下载器就直接开，不能就退回提示。
      */
     private void showUpdateFailDialog(String title, String msg, final String url) {
+        if (uiGone()) return;      // 更新是在子线程里跑的，回来时界面可能已经没了
         if (updateDlg != null && updateDlg.isShowing()) updateDlg.dismiss();
         newDialog()
                 .setTitle(title)
@@ -1478,6 +1502,7 @@ public class MainActivity extends Activity {
     // 现在点一条先问要干什么（恢复 / 改名 / 删除），清空另给一个按钮并二次确认。
 
     private void showBackupList() {
+        if (uiGone()) return;      // 删完/清空后会自动重开列表，那时代码是从子线程回来的
         new Thread(new Runnable() {
             @Override public void run() {
                 final List<HostsManager.Backup> backups = HostsManager.listBackupsDetail();

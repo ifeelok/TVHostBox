@@ -30,7 +30,8 @@ public final class HostsManager {
 
     public static final String HOSTS_PATH = "/system/etc/hosts";
     private static final String TMP_NAME = "hosts_new";
-    private static final String BACKUP_DIR = "/sdcard/hostbox";
+    /** 备份目录（包内可见：测试要把脚本里的这个路径换成临时目录才能真跑一遍） */
+    static final String BACKUP_DIR = "/sdcard/hostbox";
     /** 备份保留数量的 SharedPreferences key；0 = 不限制 */
     public static final String PREF_MAX_BACKUPS = "maxBackups";
     public static final int DEFAULT_MAX_BACKUPS = 20;
@@ -45,6 +46,16 @@ public final class HostsManager {
     /** 老版本用的是下划线：hosts.bak.20261101_175409_before_restore，盒子上现在还躺着 */
     private static final String BEFORE_RESTORE_OLD = "_before_restore";
     private static final Object SEQ_LOCK = new Object();
+    /**
+     * 读-改-写的全局锁。
+     *
+     * upsert 是「读全文 → 改一行 → 写回全文」，中间夹着两次 root 调用。
+     * RootShell 自带的 LOCK 只保证单条命令不并发，管不到这整个过程：
+     * 电视上点「写入」的同时手机也在保存，两边各读一份旧全文，
+     * 后写的那个会把先写的整条覆盖掉——用户看到的是「我明明加了，怎么没了」。
+     * 所以整段读改写必须串行；writeRaw 自己也会拿这把锁（synchronized 可重入）。
+     */
+    private static final Object RW_LOCK = new Object();
     /** 拿不到 prefs 时的序号兜底（保证同一秒也不会生成两个同名文件） */
     private static final java.util.concurrent.atomic.AtomicInteger SEQ_FALLBACK =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -223,43 +234,67 @@ public final class HostsManager {
      * @return 成功返回 null，失败返回错误信息
      */
     public static String writeRaw(String newContent) {
-        // 1. 先写入 App 私有目录
-        try {
-            File tmp = new File(AppContextHolder.get().getFilesDir(), TMP_NAME);
-            FileOutputStream fos = new FileOutputStream(tmp);
-            fos.write(newContent.getBytes("UTF-8"));
-            fos.close();
+        synchronized (RW_LOCK) {
+            // 1. 先写入 App 私有目录
+            try {
+                File tmp = new File(AppContextHolder.get().getFilesDir(), TMP_NAME);
+                FileOutputStream fos = new FileOutputStream(tmp);
+                fos.write(newContent.getBytes("UTF-8"));
+                fos.close();
 
-            // 2. 备份 + remount + 覆盖 + 校验
-            String bak = newBackupName(System.currentTimeMillis(), false);
-            String script =
-                "mkdir -p " + BACKUP_DIR + "\n" +
-                "cp -f " + HOSTS_PATH + " \"" + BACKUP_DIR + "/" + bak + "\"\n" +
-                "mount -o rw,remount /system 2>/dev/null\n" +
-                "mount -o rw,remount / 2>/dev/null\n" +
-                "cp -f " + tmp.getAbsolutePath() + " " + HOSTS_PATH + "\n" +
-                "rc=$?\n" +
-                "chmod 644 " + HOSTS_PATH + " 2>/dev/null\n" +
-                "echo WRITE_RC=$rc\n";
-            RootShell.Result r = RootShell.run(script);
-            if (r.output.contains("WRITE_RC=0")) {
-                // 按用户设置的保留数量清理旧备份（不阻塞主流程）
-                cleanupBackups();
-                // 回读校验
-                try {
-                    String back = readRaw();
-                    if (back.replaceAll("\\s+", "").equals(newContent.replaceAll("\\s+", ""))) {
-                        return null;
+                // 2. 备份 + remount + 覆盖 + 校验
+                String bak = newBackupName(System.currentTimeMillis(), false);
+                RootShell.Result r = RootShell.run(
+                        writeScript(tmp.getAbsolutePath(), HOSTS_PATH, bak));
+                if (r.output.contains("WRITE_RC=0")) {
+                    // 按用户设置的保留数量清理旧备份（不阻塞主流程）
+                    cleanupBackups();
+                    // 回读校验
+                    try {
+                        String back = readRaw();
+                        if (back.replaceAll("\\s+", "").equals(newContent.replaceAll("\\s+", ""))) {
+                            return null;
+                        }
+                        return "写入后回读内容不一致";
+                    } catch (Exception e) {
+                        return null; // 回读失败但 cp 成功，视为成功
                     }
-                    return "写入后回读内容不一致";
-                } catch (Exception e) {
-                    return null; // 回读失败但 cp 成功，视为成功
                 }
+                return "root 写入失败：" + r.output;
+            } catch (Exception e) {
+                return "写入异常：" + e;
             }
-            return "root 写入失败：" + r.output;
-        } catch (Exception e) {
-            return "写入异常：" + e;
         }
+    }
+
+    /**
+     * 覆盖 hosts 的那段 shell。抽成纯字符串是为了测试能把原文交给真 shell 跑一遍。
+     *
+     * 不用 `cp 新文件 hosts` 直接覆盖：覆盖到一半掉电/进程被杀，得到的是半截 hosts。
+     * 改成先落到同目录的 hosts.new，再 mv 过去——同一分区上的 mv 是原子的，
+     * 要么还是旧文件、要么整份新文件，不存在中间态。
+     *
+     * 但有的机器 /system/etc/hosts 是软链接（指向 /etc/hosts 之类），
+     * mv 上去会把链接换成一个普通文件，那是改硬件行为，所以先判一下：
+     * 是链接就老老实实 cp 穿透过去（保持原来的语义），只在普通文件上走原子替换。
+     *
+     * 用 if/[ 而不是 `cp || exit`：exit 会把常驻的 su 会话一起带走。
+     */
+    static String writeScript(String tmpPath, String hostsPath, String backupName) {
+        return "mkdir -p " + BACKUP_DIR + "\n"
+             + "cp -f " + hostsPath + " \"" + BACKUP_DIR + "/" + backupName + "\"\n"
+             + "mount -o rw,remount /system 2>/dev/null\n"
+             + "mount -o rw,remount / 2>/dev/null\n"
+             + "rc=1\n"
+             + "if [ -L " + hostsPath + " ]; then\n"
+             + "  cp -f " + tmpPath + " " + hostsPath + "\n"   // 软链接：穿透写，保持链接
+             + "  rc=$?\n"
+             + "else\n"
+             + "  cp -f " + tmpPath + " " + hostsPath + ".new\n"
+             + "  if [ $? -eq 0 ]; then mv -f " + hostsPath + ".new " + hostsPath + "; rc=$?; fi\n"
+             + "fi\n"
+             + "chmod 644 " + hostsPath + " 2>/dev/null\n"
+             + "echo WRITE_RC=$rc\n";
     }
 
     /**
@@ -284,10 +319,12 @@ public final class HostsManager {
      * @return null=成功
      */
     public static String upsert(String domain, String ip, String note) {
-        try {
-            return writeRaw(upsertText(readRaw(), domain, ip, note));
-        } catch (Exception e) {
-            return e.toString();
+        synchronized (RW_LOCK) {      // 读改写整个过程串行，别让手机和电视各写各的
+            try {
+                return writeRaw(upsertText(readRaw(), domain, ip, note));
+            } catch (Exception e) {
+                return e.toString();
+            }
         }
     }
 
@@ -374,12 +411,14 @@ public final class HostsManager {
      * @return 错误信息或 null（成功）
      */
     public static String remove(String domain) {
-        try {
-            String out = removeText(readRaw(), domain);
-            if (out == null) return "没找到该条目：" + domain;
-            return writeRaw(out);
-        } catch (Exception e) {
-            return e.toString();
+        synchronized (RW_LOCK) {      // 同 upsert：读改写整段串行
+            try {
+                String out = removeText(readRaw(), domain);
+                if (out == null) return "没找到该条目：" + domain;
+                return writeRaw(out);
+            } catch (Exception e) {
+                return e.toString();
+            }
         }
     }
 
@@ -612,9 +651,9 @@ public final class HostsManager {
 
     /** 清空全部备份（连用户起的名字一起清） */
     public static String clearBackups() {
-        // 用通配符而不是逐个拼名字：文件名由 shell 展开，天然不掺任何外来输入
-        RootShell.Result r = RootShell.run(
-            "cd " + BACKUP_DIR + " 2>/dev/null\nrm -f hosts.bak.*\n");
+        // 用通配符而不是逐个拼名字：文件名由 shell 展开，天然不掺任何外来输入。
+        // 路径写全，不靠先 cd——cd 失败时 rm 会落到 su 的当前目录里（那可能是 /）
+        RootShell.Result r = RootShell.run("rm -f " + BACKUP_DIR + "/hosts.bak.*\n");
         if (!r.ok) return "清空失败：" + r.output;
         clearAllLabels();
         return null;
@@ -716,9 +755,11 @@ public final class HostsManager {
             List<Backup> all = listBackupsDetail();
             if (all.size() <= keep) return;
             // 按名字逐个删：名字都过过白名单，比在 shell 里拼 tail -n +N 更靠得住
-            StringBuilder sb = new StringBuilder("cd " + BACKUP_DIR + " 2>/dev/null\n");
+            StringBuilder sb = new StringBuilder();
             for (int i = keep; i < all.size(); i++) {
-                sb.append("rm -f \"").append(all.get(i).name).append("\"\n");
+                // 绝对路径，不靠 cd：cd 失败时 rm 会在错误目录里删同名文件
+                sb.append("rm -f \"").append(BACKUP_DIR).append("/")
+                        .append(all.get(i).name).append("\"\n");
             }
             RootShell.run(sb.toString());
             for (int i = keep; i < all.size(); i++) removeLabel(all.get(i).name);
@@ -728,21 +769,38 @@ public final class HostsManager {
     /** 恢复指定备份文件（恢复前先把当前 hosts 也备份一份，防误恢复无法回退） */
     public static String restoreBackup(String name) {
         if (!isSafeBackupName(name)) return "备份名不合法：" + name;
-        String bak = newBackupName(System.currentTimeMillis(), true);
-        String script =
-            "mkdir -p " + BACKUP_DIR + "\n" +
-            "cp -f " + HOSTS_PATH + " \"" + BACKUP_DIR + "/" + bak + "\"\n" +
-            "mount -o rw,remount /system 2>/dev/null\n" +
-            "mount -o rw,remount / 2>/dev/null\n" +
-            "cp -f \"" + BACKUP_DIR + "/" + name + "\" " + HOSTS_PATH + "\n" +
-            "chmod 644 " + HOSTS_PATH + "\n" +
-            "echo RC=$?\n";
-        RootShell.Result r = RootShell.run(script);
-        if (r.output.contains("RC=0")) {
-            cleanupBackups();
-            return null;
+        synchronized (RW_LOCK) {
+            String bak = newBackupName(System.currentTimeMillis(), true);
+            RootShell.Result r = RootShell.run(restoreScript(
+                    BACKUP_DIR + "/" + name, HOSTS_PATH, bak));
+            if (r.output.contains("RC=0")) {
+                cleanupBackups();
+                return null;
+            }
+            return "恢复失败：" + r.output;
         }
-        return "恢复失败：" + r.output;
+    }
+
+    /**
+     * 恢复用的 shell：和 writeScript 一样走「先 .new 再 mv」的原子替换，
+     * 恢复同样是一次整文件覆盖，中途断掉一样会得到半截 hosts。
+     * 恢复前先把当前文件备份一份（.before_restore），这是恢复唯一的后悔药。
+     */
+    static String restoreScript(String backupPath, String hostsPath, String beforeName) {
+        return "mkdir -p " + BACKUP_DIR + "\n"
+             + "cp -f " + hostsPath + " \"" + BACKUP_DIR + "/" + beforeName + "\"\n"
+             + "mount -o rw,remount /system 2>/dev/null\n"
+             + "mount -o rw,remount / 2>/dev/null\n"
+             + "rc=1\n"
+             + "if [ -L " + hostsPath + " ]; then\n"
+             + "  cp -f \"" + backupPath + "\" " + hostsPath + "\n"
+             + "  rc=$?\n"
+             + "else\n"
+             + "  cp -f \"" + backupPath + "\" " + hostsPath + ".new\n"
+             + "  if [ $? -eq 0 ]; then mv -f " + hostsPath + ".new " + hostsPath + "; rc=$?; fi\n"
+             + "fi\n"
+             + "chmod 644 " + hostsPath + " 2>/dev/null\n"
+             + "echo RC=$rc\n";
     }
 
     private static SharedPreferences prefs() {
