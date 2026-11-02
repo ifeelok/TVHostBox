@@ -754,8 +754,10 @@ public class MainActivity extends Activity {
         final List<HostCheck.Result> sorted = HostCheck.sortForReport(res);
         String[] items = new String[sorted.size()];
         for (int i = 0; i < sorted.size(); i++) {
-            // ✕ 打头标出不通的：这一列一眼扫下去就知道有几条红的
-            items[i] = (sorted.get(i).ok() ? "·  " : "✕  ") + HostCheck.line(sorted.get(i));
+            HostCheck.Result x = sorted.get(i);
+            // 三种标记：不通 ✕、可达 ·、本机/屏蔽 –（没测，别让它看着像个故障）
+            String mark = x.skipped() ? "–  " : (x.ok() ? "·  " : "✕  ");
+            items[i] = mark + HostCheck.line(x);
         }
         newDialog()
                 .setTitle("体检 · " + HostCheck.summary(sorted))

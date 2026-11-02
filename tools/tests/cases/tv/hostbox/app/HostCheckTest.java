@@ -69,6 +69,45 @@ public class HostCheckTest {
         check("空列表不炸", HostCheck.group(list()).isEmpty());
         check("null 不炸", HostCheck.group(null).isEmpty());
 
+        System.out.println("\n=== 地址分类：本机 / 屏蔽的不该去连 ===");
+        // 盒子默认 hosts 里就有 127.0.0.1 localhost 和 ::1 ip6-localhost，
+        // 不分类的话一按体检先看到两条红的，用户以为出事了
+        eq("127.0.0.1 是本机", HostCheck.KIND_LOCAL, HostCheck.kind("127.0.0.1"));
+        eq("127/8 整段都算本机", HostCheck.KIND_LOCAL, HostCheck.kind("127.10.20.30"));
+        eq("::1 是本机", HostCheck.KIND_LOCAL, HostCheck.kind("::1"));
+        eq("::1 的完整写法也认", HostCheck.KIND_LOCAL, HostCheck.kind("0:0:0:0:0:0:0:1"));
+        eq("大写也认", HostCheck.KIND_LOCAL, HostCheck.kind("::1".toUpperCase()));
+        eq("带方括号的写法也认（防手抖）", HostCheck.KIND_LOCAL, HostCheck.kind("[::1]"));
+        eq("0.0.0.0 是屏蔽写法", HostCheck.KIND_BLOCK, HostCheck.kind("0.0.0.0"));
+        eq(":: 也是屏蔽写法", HostCheck.KIND_BLOCK, HostCheck.kind("::"));
+        eq("公网 IP 正常测", HostCheck.KIND_NORMAL, HostCheck.kind("104.16.1.1"));
+        eq("IPv6 公网地址正常测", HostCheck.KIND_NORMAL, HostCheck.kind("2606:50c0:8001::154"));
+        eq("局域网地址正常测（那是真机器，得连）", HostCheck.KIND_NORMAL, HostCheck.kind("192.168.1.8"));
+        eq("null 按正常处理", HostCheck.KIND_NORMAL, HostCheck.kind(null));
+
+        System.out.println("\n=== 本机/屏蔽不进分母 ===");
+        List<HostCheck.Result> mixed = results(
+                r("104.16.1.1", 23), r("127.0.0.1", -1), r("::1", -1), r("0.0.0.0", -1));
+        eq("3 条本机/屏蔽被认出", 3, HostCheck.skippedCount(mixed));
+        eq("只为 1 个真地址报结果", 1, HostCheck.okCount(mixed));
+        // 关键：127.0.0.1 永远连不通，但它是「本机自己」，不该算成故障
+        eq("分母里不含本机条目", "1 个地址全部可达（另 3 条本机/屏蔽，未测）",
+                HostCheck.summary(mixed));
+        eq("全是本机条目时也有话说", "2 个地址都是本机或屏蔽条目，没有可测的",
+                HostCheck.summary(results(r("127.0.0.1", -1), r("::1", -1))));
+        eq("没测的排在最后（不占视线）", "9.9.9.9:-1,1.1.1.1:20,127.0.0.1:-1",
+                order(HostCheck.sortForReport(results(
+                        r("127.0.0.1", -1), r("9.9.9.9", -1), r("1.1.1.1", 20)))));
+
+        System.out.println("\n=== 文案：别把本机写成「不通」 ===");
+        HostCheck.Result lo = r("127.0.0.1", -1);
+        lo.hosts.add("localhost");
+        eq("本机条目标「本机（不测）」", "localhost · 127.0.0.1 · 本机（不测）",
+                HostCheck.line(lo));
+        HostCheck.Result blk = r("0.0.0.0", -1);
+        blk.hosts.add("ads.example.com");
+        eq("屏蔽条目也说得清", "ads.example.com · 0.0.0.0 · 屏蔽（不测）", HostCheck.line(blk));
+
         System.out.println("\n=== 统计 ===");
         eq("通了 2 个", 2, HostCheck.okCount(results(r("1.1.1.1", 20), r("2.2.2.2", -1), r("3.3.3.3", 9))));
         eq("全通", "3 个地址全部可达", HostCheck.summary(results(r("1.1.1.1", 20), r("2.2.2.2", 30), r("3.3.3.3", 40))));

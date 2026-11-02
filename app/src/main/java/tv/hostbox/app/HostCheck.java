@@ -23,10 +23,40 @@ public final class HostCheck {
     private static final int[] PORTS = {443, 80};
     private static final int TIMEOUT_MS = 1500;
 
+    /** 正常地址：连端口 */
+    static final int KIND_NORMAL = 0;
+    /** 回环：127.0.0.0/8、::1 —— 本机自己，连 443 当然不通，测它毫无意义 */
+    static final int KIND_LOCAL = 1;
+    /** 未指定地址：0.0.0.0、:: —— 广告屏蔽的惯用写法，本来就不该有服务 */
+    static final int KIND_BLOCK = 2;
+
     private HostCheck() {}
+
+    /**
+     * 这个地址值不值得连。
+     *
+     * 不分类的话，盒子上默认那两条 `127.0.0.1 localhost` / `::1 ip6-localhost`
+     * 会稳定报「不通」——用户一按体检先看到两条红的，还以为出事了。
+     * 它们不是「坏了」，是「本机自己」，压根没有服务在 443/80 上等着。
+     */
+    static int kind(String ip) {
+        if (ip == null) return KIND_NORMAL;
+        String s = ip.trim();
+        if (s.length() > 2 && s.charAt(0) == '[' && s.charAt(s.length() - 1) == ']') {
+            s = s.substring(1, s.length() - 1);   // 防御：万一有人写成 [::1]
+        }
+        s = s.toLowerCase(java.util.Locale.US);
+        if (s.startsWith("127.")) return KIND_LOCAL;             // 127/8 整段都是回环
+        if (s.equals("::1") || s.equals("0:0:0:0:0:0:0:1")) return KIND_LOCAL;
+        if (s.equals("0.0.0.0")) return KIND_BLOCK;
+        if (s.equals("::") || s.equals("0:0:0:0:0:0:0:0")) return KIND_BLOCK;
+        return KIND_NORMAL;
+    }
 
     public static class Result {
         public final String ip;
+        /** 见 KIND_*：本机/屏蔽的不去连，只标出来 */
+        public final int kind;
         /** 这个 IP 上挂着哪些域名（同一行多个域名、或多行同 IP，都会合到一条） */
         public final List<String> hosts = new ArrayList<String>();
         public int rttMs = -1;    // -1 = 不通
@@ -34,10 +64,16 @@ public final class HostCheck {
 
         Result(String ip) {
             this.ip = ip;
+            this.kind = kind(ip);
         }
 
         public boolean ok() {
-            return rttMs >= 0;
+            return kind == KIND_NORMAL && rttMs >= 0;
+        }
+
+        /** 本机 / 屏蔽：没测，也不该算进「可达」里 */
+        public boolean skipped() {
+            return kind != KIND_NORMAL;
         }
     }
 
@@ -62,30 +98,49 @@ public final class HostCheck {
         return map;
     }
 
-    /** 通了几个 */
+    /** 通了几个（只算真的测过的） */
     static int okCount(List<Result> list) {
         int n = 0;
         for (int i = 0; i < list.size(); i++) if (list.get(i).ok()) n++;
         return n;
     }
 
-    /** 一句话总结： 「5 个地址，3 个可达」/「5 个地址全部可达」 */
+    /** 跳过了几个（本机 / 屏蔽） */
+    static int skippedCount(List<Result> list) {
+        int n = 0;
+        for (int i = 0; i < list.size(); i++) if (list.get(i).skipped()) n++;
+        return n;
+    }
+
+    /**
+     * 一句话总结： 「5 个地址，3 个可达」
+     * 本机/屏蔽那几条不混进分母——`127.0.0.1` 永远「不通」，把它算进去就成了
+     * 「5 个地址 3 个可达」里的假故障，看着像出事。
+     */
     static String summary(List<Result> list) {
         if (list.isEmpty()) return "还没有可体检的条目";
+        int total = list.size();
+        int skipped = skippedCount(list);
+        int measured = total - skipped;
+        if (measured == 0) return total + " 个地址都是本机或屏蔽条目，没有可测的";
         int ok = okCount(list);
-        if (ok == list.size()) return list.size() + " 个地址全部可达";
-        return list.size() + " 个地址，" + ok + " 个可达";
+        String s = (ok == measured)
+                ? measured + " 个地址全部可达"
+                : measured + " 个地址，" + ok + " 个可达";
+        if (skipped > 0) s += "（另 " + skipped + " 条本机/屏蔽，未测）";
+        return s;
     }
 
     /**
      * 排成体检报告的顺序：不通的排最前面（那是你要找的），
-     * 其余按延迟从低到高——一眼看出哪条最快。
+     * 其余按延迟从低到高；本机/屏蔽这些没测的放最末尾，不占视线。
      */
     static List<Result> sortForReport(List<Result> list) {
         List<Result> out = new ArrayList<Result>(list);
         java.util.Collections.sort(out, new java.util.Comparator<Result>() {
             @Override public int compare(Result a, Result b) {
-                if (a.ok() != b.ok()) return a.ok() ? 1 : -1;   // 不通的在前
+                if (a.skipped() != b.skipped()) return a.skipped() ? 1 : -1;   // 没测的垫底
+                if (a.ok() != b.ok()) return a.ok() ? 1 : -1;                   // 不通的在前
                 if (a.rttMs != b.rttMs) return a.rttMs < b.rttMs ? -1 : 1;
                 return a.ip.compareTo(b.ip);
             }
@@ -103,7 +158,9 @@ public final class HostCheck {
             sb.append(" · ");
         }
         sb.append(r.ip).append(" · ");
-        sb.append(r.ok() ? (r.rttMs + "ms") : "不通");
+        if (r.kind == KIND_LOCAL) sb.append("本机（不测）");
+        else if (r.kind == KIND_BLOCK) sb.append("屏蔽（不测）");
+        else sb.append(r.ok() ? (r.rttMs + "ms") : "不通");
         return sb.toString();
     }
 
@@ -111,9 +168,15 @@ public final class HostCheck {
     static List<Result> run(List<HostsManager.Entry> entries) {
         List<Result> list = new ArrayList<Result>(group(entries).values());
         if (list.isEmpty()) return list;
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(8, list.size()));
+        // 本机/屏蔽的不去连：连了也是必然超时，白等两轮
+        List<Result> todo = new ArrayList<Result>();
         for (int i = 0; i < list.size(); i++) {
-            final Result r = list.get(i);
+            if (!list.get(i).skipped()) todo.add(list.get(i));
+        }
+        if (todo.isEmpty()) return list;
+        ExecutorService pool = Executors.newFixedThreadPool(Math.min(8, todo.size()));
+        for (int i = 0; i < todo.size(); i++) {
+            final Result r = todo.get(i);
             pool.execute(new Runnable() {
                 @Override public void run() {
                     for (int p = 0; p < PORTS.length; p++) {
