@@ -1703,6 +1703,15 @@ public class MainActivity extends Activity {
                                         showBackupActionMenu(names[w], labels[w]);
                                     }
                                 })
+                                // 手滑删错一条时的救急入口：最近一份备份就是「改之前」，
+                                // 不用再进列表挑、也不用先想清楚是哪一份
+                                .setPositiveButton("撤销上次修改",
+                                        new android.content.DialogInterface.OnClickListener() {
+                                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                                        confirmUndoLast(backups.get(0).name,
+                                                HostsManager.backupLabelText(backups.get(0)));
+                                    }
+                                })
                                 .setNeutralButton("清空全部",
                                         new android.content.DialogInterface.OnClickListener() {
                                     @Override public void onClick(android.content.DialogInterface d, int w) {
@@ -1725,17 +1734,48 @@ public class MainActivity extends Activity {
     private void showBackupActionMenu(final String name, final String label) {
         newDialog()
                 .setTitle(label)
-                .setItems(new String[]{"查看内容", "恢复到这份", "改个名字（好认）", "删除这份"},
+                .setItems(new String[]{"查看内容", "和当前对比", "恢复到这份", "改个名字（好认）", "删除这份"},
                         new android.content.DialogInterface.OnClickListener() {
                     @Override public void onClick(android.content.DialogInterface d, int w) {
                         if (w == 0) showBackupContent(name, label);
-                        else if (w == 1) confirmRestoreBackup(name, label);
-                        else if (w == 2) showRenameBackupDialog(name);
+                        else if (w == 1) showBackupDiff(name, label);
+                        else if (w == 2) confirmRestoreBackup(name, label);
+                        else if (w == 3) showRenameBackupDialog(name);
                         else confirmDeleteBackup(name, label);
                     }
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /**
+     * 和当前 hosts 对比：按「恢复这份会变成什么样」来说。
+     * 看内容是「这份长什么样」，对比才是「按下去会发生什么」——后者才是恢复前该确认的。
+     */
+    private void showBackupDiff(final String name, final String label) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String bak = HostsManager.readBackup(name);
+                String cur = null;
+                try { cur = HostsManager.readRaw(); } catch (Exception ignored) {}
+                final String now = cur;
+                ui.post(new Runnable() {
+                    @Override public void run() {
+                        if (uiGone()) return;
+                        if (bak == null) { toast("读不到这份备份（可能已经被删了）"); return; }
+                        if (now == null) { toast("读不到当前 hosts"); return; }
+                        String diff = HostsManager.diffText(now, bak);
+                        boolean same = diff.startsWith("和当前完全一样");
+                        newDialog()
+                                .setTitle(same ? "和当前一样" : "恢复「" + label + "」之后")
+                                .setMessage(same ? diff
+                                        : diff + "\n- 会消失    + 会新增    ~ 会变")
+                                .setNegativeButton("关闭", null)
+                                .show();
+                    }
+                });
+            }
+        }, "backup-diff").start();
     }
 
     /** 最多显示多少条：再多就是同一屏上下翻，弹窗里堆上百行反而看不清 */
@@ -1811,6 +1851,26 @@ public class MainActivity extends Activity {
     }
 
     /** 恢复前再问一次：恢复会直接覆盖 /system/etc/hosts */
+    /**
+     * 撤销上次修改 = 恢复到最近一份备份。
+     *
+     * 说法比「恢复到这份？」更贴场景：用户按这个按钮时脑子里想的是「我刚才改坏了」，
+     * 不是「我要挑一个时间点」。
+     */
+    private void confirmUndoLast(final String name, final String label) {
+        newDialog()
+                .setTitle("撤销上次修改？")
+                .setMessage("hosts 会回到上一次改动之前：\n\n" + label
+                        + "\n\n当前内容会先自动备份一份，所以撤销本身也能再撤销。")
+                .setPositiveButton("撤销", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        doRestoreBackup(name, label);
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void confirmRestoreBackup(final String name, final String label) {
         newDialog()
                 .setTitle("恢复到这份？")

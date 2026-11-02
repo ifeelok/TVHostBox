@@ -15,6 +15,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -754,6 +755,73 @@ public final class HostsManager {
         RootShell.Result r = RootShell.run("cat \"" + BACKUP_DIR + "/" + name + "\" 2>/dev/null\n");
         if (!r.ok) return null;
         return r.output;
+    }
+
+    /**
+     * 「恢复这份备份以后会变成什么样」。
+     *
+     * 只比解析出来的条目，不比行号和整行文本——行号会随增删整体平移（删一行，后面全错位），
+     * 拿行号当身份会得出一片假差异。注释里的时间戳同理，比的是「同一个域名指向哪」。
+     *
+     * 方向按「恢复后」说，这才是用户按下恢复时关心的事：
+     *    -  恢复后消失（现在有、这份没有）
+     *    +  恢复后新增（这份有、现在没有）
+     *    ~  恢复后变了（同一个域名：IP 变了，或只有备注变了）
+     */
+    public static String diffText(String current, String backup) {
+        Map<String, Entry> cur = byDomain(current);
+        Map<String, Entry> bak = byDomain(backup);
+        List<String> lines = new ArrayList<String>();
+        int total = 0;
+
+        // 按当前文件的顺序列：先看「会丢什么」，用户最怕的是这个
+        for (Map.Entry<String, Entry> e : cur.entrySet()) {
+            Entry now = e.getValue();
+            Entry then = bak.get(e.getKey());
+            if (then == null) {
+                lines.add("-  " + e.getKey() + " · " + now.ip);
+            } else if (!now.ip.equals(then.ip)) {
+                lines.add("~  " + e.getKey() + " · " + now.ip + " → " + then.ip);
+            } else if (!sameText(now.comment, then.comment)) {
+                lines.add("~  " + e.getKey() + " · " + now.ip + " · 备注会变");
+            } else {
+                continue;
+            }
+            total++;
+        }
+        for (Map.Entry<String, Entry> e : bak.entrySet()) {
+            if (cur.containsKey(e.getKey())) continue;
+            lines.add("+  " + e.getKey() + " · " + e.getValue().ip);
+            total++;
+        }
+
+        if (total == 0) return "和当前完全一样，恢复它不会有任何变化。";
+        StringBuilder sb = new StringBuilder();
+        int show = Math.min(lines.size(), DIFF_MAX);
+        for (int i = 0; i < show; i++) sb.append(lines.get(i)).append('\n');
+        if (lines.size() > show) {
+            sb.append("…还有 ").append(lines.size() - show).append(" 处变化没列出来\n");
+        }
+        return sb.toString();
+    }
+
+    /** 最多列多少行差异：再多就是上下翻屏，反正恢复是一整份覆盖 */
+    private static final int DIFF_MAX = 40;
+
+    /** 域名 → 条目（同域名出现多次只留第一条：全文本来就只认第一条解析） */
+    private static Map<String, Entry> byDomain(String raw) {
+        Map<String, Entry> map = new java.util.LinkedHashMap<String, Entry>();
+        if (raw == null) return map;
+        List<Entry> list = parse(raw);
+        for (int i = 0; i < list.size(); i++) {
+            Entry e = list.get(i);
+            if (!map.containsKey(e.host)) map.put(e.host, e);
+        }
+        return map;
+    }
+
+    private static boolean sameText(String a, String b) {
+        return a == null ? b == null : a.equals(b);
     }
 
     /** 取用户给这份备份起的名字（没起过则空串） */
