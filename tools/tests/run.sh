@@ -21,7 +21,7 @@ SRC="$ROOT/app/src/main/java"
 # 一执行就 "Bad CPU type"——所以每个候选都先 javac -version 试一下。
 JAVAC=""
 JAVA=""
-for home in "${JAVA_HOME:-}" /opt/homebrew/opt/java /usr/local/opt/java; do
+for home in "${JAVA_HOME:-}" /opt/homebrew/opt/openjdk@17 /opt/homebrew/opt/java /usr/local/opt/java; do
     [ -n "$home" ] || continue
     [ -x "$home/bin/javac" ] || continue
     if "$home/bin/javac" -version >/dev/null 2>&1; then
