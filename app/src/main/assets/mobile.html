@@ -125,6 +125,21 @@
   }
   .hint{color:var(--sub);font-size:12px;margin:10px 0 0}
 
+  /* ---------- 亮度管理 ---------- */
+  .dimrow{display:flex;align-items:center;gap:12px;margin:2px 0 6px}
+  .dimval{
+    flex:1;font-size:36px;font-weight:700;line-height:1.1;color:var(--accent);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  .dimrow .ghost{flex:none;height:40px}
+  input[type=range]{
+    width:100%;height:36px;margin:0;padding:0;
+    background:transparent;accent-color:var(--primary);
+  }
+  .dimlabels{display:flex;justify-content:space-between;color:var(--sub);font-size:11.5px}
+  .chip.on{background:rgba(79,195,247,.24);border-color:var(--accent);color:#DFF4FF}
+  .chip.warn{color:var(--danger);border-color:rgba(239,83,80,.32);background:rgba(239,83,80,.08)}
+
   /* ---------- 表单 ---------- */
   .field{display:block;margin-bottom:11px}
   .field span{display:block;font-size:12px;color:var(--sub);margin-bottom:5px;letter-spacing:.3px}
@@ -236,6 +251,54 @@
 </header>
 
 <main>
+  <section class="card" id="dimCard">
+    <div class="card-head">
+      <h2>亮度管理</h2>
+      <span class="count" id="dimStatus">读取中…</span>
+    </div>
+    <div class="dimrow">
+      <div class="dimval" id="dimVal">--</div>
+      <button class="ghost" id="dimToggle">开启调光</button>
+    </div>
+    <input type="range" id="dimRange" min="30" max="100" step="1" value="80"
+           aria-label="屏幕亮度">
+    <div class="dimlabels"><span>30% 最暗</span><span>100% 不遮罩</span></div>
+    <div class="chips" id="tempChips" style="margin:12px 0 8px">
+      <span class="chip" data-k="6500">中性 6500K</span>
+      <span class="chip" data-k="4500">微暖 4500K</span>
+      <span class="chip" data-k="3600">护眼 3600K</span>
+    </div>
+    <div class="chips" style="margin:0 0 2px">
+      <span class="chip" data-preset="100,6500">日间 100%</span>
+      <span class="chip" data-preset="80,6500">观影 80%</span>
+      <span class="chip" data-preset="50,3600">夜间 50%</span>
+      <span class="chip warn" id="dimOff">关闭调光</span>
+    </div>
+    <p class="hint" id="dimPerm">正在读取盒子上的调光状态…</p>
+  </section>
+
+  <section class="card" id="installCard">
+    <div class="card-head">
+      <h2>下载安装 APK</h2>
+      <span class="count" id="instStatus">空闲</span>
+    </div>
+    <label class="field"><span>APK 直链（http / https）</span>
+      <input id="instUrl" autocomplete="off" autocapitalize="off" spellcheck="false"
+             placeholder="http://192.168.1.10:8000/HostBox.apk">
+    </label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 10px">
+      <button class="primary" id="instGo" style="flex:1;min-width:140px">下载并安装</button>
+      <button class="ghost" id="instMb">安装 MidnightBeam</button>
+      <button class="ghost" id="instLatest">装 Host管家 最新版</button>
+    </div>
+    <div id="instBarWrap" style="display:none;height:7px;border-radius:999px;
+         background:rgba(255,255,255,.08);overflow:hidden;margin:2px 0 10px">
+      <div id="instBar" style="height:100%;width:0;background:var(--accent);transition:width .2s"></div>
+    </div>
+    <p class="hint" id="instMsg">填一个 APK 直链，盒子自己下载并用 root 静默安装，不用再连电脑 adb。</p>
+    <p class="hint">这里只是遥控器：APK 下载到<b>盒子</b>并安装，不会存到手机。「安装 MidnightBeam」一键装官方最新版（自动走 GitHub API 资产通道，绕开直链 502）；「装 Host管家 最新版」会先比版本号，远端更旧时自动取消。</p>
+  </section>
+
   <section class="card">
     <div class="card-head">
       <h2>当前 hosts 条目</h2>
@@ -406,6 +469,71 @@
     });
   }
 
+  // ---------- 亮度管理 ----------
+  var dimState = {bright:80, temp:6500, on:false, permission:false};
+  var dimTimer = null;
+
+  function loadDim(){
+    return fetch('/api/dim/state', {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(st){
+        dimState = st;
+        // 拖动过程中不要把手里的滑块拽回去
+        if (document.activeElement !== $('#dimRange')) $('#dimRange').value = st.bright;
+        $('#dimVal').textContent = st.bright + '%';
+        $('#dimStatus').textContent = st.on ? '● 生效中' : '○ 已关闭';
+        $('#dimToggle').textContent = st.on ? '关闭调光' : '开启调光';
+        $('#dimPerm').textContent = st.permission
+          ? '遮罩覆盖桌面与所有应用；盒子没有背光硬件，这是软件调光，电视本身亮度不变。'
+          : '⚠ 缺少悬浮窗权限，拖动滑块会自动用 root 授权。';
+        Array.prototype.forEach.call(document.querySelectorAll('#tempChips .chip'), function(c){
+          var k = +c.getAttribute('data-k');
+          c.className = 'chip' + (Math.abs(st.temp - k) < 300 ? ' on' : '');
+        });
+      })
+      .catch(function(){ /* 连不上就保留上一次显示 */ });
+  }
+
+  /** 滑块边拖边生效：130ms 防抖，既跟手又不会一次拖动发几十个请求 */
+  function queueDim(){
+    var b = +$('#dimRange').value;
+    $('#dimVal').textContent = b + '%';
+    clearTimeout(dimTimer);
+    dimTimer = setTimeout(function(){ sendDim(b, null, true); }, 130);
+  }
+
+  function sendDim(b, k, on){
+    clearTimeout(dimTimer);
+    var bright = (b == null ? dimState.bright : b);
+    var temp   = (k == null ? dimState.temp : k);
+    var body = 'bright=' + encodeURIComponent(bright)
+             + '&temp=' + encodeURIComponent(temp)
+             + '&on=' + (on ? 1 : 0);
+    return post('/api/dim/set', body)
+      .then(function(){ return loadDim(); })
+      .catch(function(m){ toast(m.message || m, false); });
+  }
+
+  $('#dimRange').addEventListener('input', queueDim);
+  $('#dimRange').addEventListener('change', queueDim);
+  $('#dimToggle').addEventListener('click', function(){
+    sendDim(null, null, !dimState.on);
+  });
+  $('#dimOff').addEventListener('click', function(){
+    post('/api/dim/off', '')
+      .then(function(){ toast('已关闭调光'); loadDim(); })
+      .catch(function(m){ toast(m.message || m, false); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#tempChips .chip'), function(c){
+    c.addEventListener('click', function(){ sendDim(null, +c.getAttribute('data-k'), true); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('[data-preset]'), function(c){
+    c.addEventListener('click', function(){
+      var p = c.getAttribute('data-preset').split(',');
+      sendDim(+p[0], +p[1], true);
+    });
+  });
+
   // ---------- 备份 ----------
   function renderBackups(){
     var ul = $('#bkList');
@@ -493,6 +621,7 @@
 
   function refresh(){
     setPill('同步中', true);
+    loadDim();                  // 亮度是独立接口，别被 hosts 读取失败连带拖住
     return fetch('/api/state', {cache:'no-store'})
       .then(function(r){ return r.json(); })
       .then(function(st){
@@ -574,6 +703,85 @@
     loadRaw().then(function(){ toast('已重新加载当前 hosts'); })
             .catch(function(){ toast('读取失败', false); });
   });
+
+  // ---------- 下载安装 APK ----------
+  var instTimer = null;
+  var instActive = false;
+
+  function renderInstall(st){
+    var label = st.phase === 'downloading' ? '下载中'
+              : st.phase === 'installing' ? '安装中'
+              : st.phase === 'done' ? '已完成'
+              : st.phase === 'error' ? '失败' : '空闲';
+    $('#instStatus').textContent = label;
+    $('#instMsg').textContent = st.message
+      + (st.source && st.phase !== 'idle' ? '（来源：' + st.source + '）' : '');
+    var busy = st.phase === 'downloading' || st.phase === 'installing';
+    $('#instGo').disabled = busy;
+    $('#instMb').disabled = busy;
+    $('#instLatest').disabled = busy;
+    var wrap = $('#instBarWrap');
+    if (busy){
+      wrap.style.display = 'block';
+      var p = st.percent > 0 ? Math.min(100, st.percent)
+            : (st.phase === 'installing' ? 100 : 8);
+      $('#instBar').style.width = p + '%';
+    } else {
+      wrap.style.display = 'none';
+    }
+  }
+
+  function pollInstall(){
+    fetch('/api/install/status', {cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(st){
+        renderInstall(st);
+        var busy = st.phase === 'downloading' || st.phase === 'installing';
+        if (busy){
+          instTimer = setTimeout(pollInstall, 700);
+        } else {
+          instTimer = null;
+          if (instActive){
+            instActive = false;
+            toast(st.phase === 'done' ? '✔ 安装成功' : st.message,
+                  st.phase !== 'done');
+          }
+        }
+      })
+      .catch(function(){
+        if (!instActive){ instTimer = null; return; }
+        // 装的是 Host管家自己时 pm install 会杀掉进程并重启，服务会短暂断开；
+        // 这不是失败，别误报，等它回来继续问状态
+        $('#instStatus').textContent = '重启中';
+        $('#instMsg').textContent = '连接中断：应用可能正在安装并重启，稍后会自动重连确认结果。';
+        instTimer = setTimeout(pollInstall, 2500);
+      });
+  }
+
+  function startInstall(mode, url){
+    var body = 'mode=' + encodeURIComponent(mode)
+             + (mode === 'url' ? '&url=' + encodeURIComponent(url) : '');
+    post('/api/install', body)
+      .then(function(){
+        instActive = true;
+        if (instTimer) clearTimeout(instTimer);
+        pollInstall();
+      })
+      .catch(function(m){ toast(m.message || m, false); });
+  }
+
+  $('#instGo').addEventListener('click', function(){
+    var u = $('#instUrl').value.trim();
+    if (!/^https?:\/\//i.test(u)){
+      toast('请填 http:// 或 https:// 开头的 APK 直链', false);
+      return;
+    }
+    startInstall('url', u);
+  });
+  $('#instMb').addEventListener('click', function(){ startInstall('midnightbeam', ''); });
+  $('#instLatest').addEventListener('click', function(){ startInstall('latest', ''); });
+  // 页面刚打开时也读一次：上一轮安装的结果还在盒子上
+  pollInstall();
 
   // 从其它页面返回（切后台再回来）时自动同步一次
   document.addEventListener('visibilitychange', function(){

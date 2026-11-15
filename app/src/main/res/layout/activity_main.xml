@@ -53,7 +53,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="1dp"
-                android:text="hosts 管理 · 手机配置 · Cloudflare 优选"
+                android:text="hosts 管理 · 手机配置 · Cloudflare 优选 · 亮度管理"
                 android:textColor="#7E8CA3"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -143,10 +143,21 @@
             android:id="@+id/nav_cf"
             android:layout_width="wrap_content"
             android:layout_height="40dp"
+            android:layout_marginEnd="10dp"
             android:paddingStart="20dp"
             android:paddingEnd="20dp"
             android:stateListAnimator="@null"
             android:text="CF 优选"
+            android:textSize="16sp" />
+
+        <Button
+            android:id="@+id/nav_dim"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:paddingStart="20dp"
+            android:paddingEnd="20dp"
+            android:stateListAnimator="@null"
+            android:text="亮度管理"
             android:textSize="16sp" />
     </LinearLayout>
 

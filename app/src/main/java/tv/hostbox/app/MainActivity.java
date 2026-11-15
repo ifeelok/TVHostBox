@@ -40,6 +40,8 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
 
+import org.json.JSONObject;
+
 import io.nayuki.qrcodegen.QrCode;
 
 public class MainActivity extends Activity {
@@ -52,8 +54,8 @@ public class MainActivity extends Activity {
     private static final String PREF_THEME = "themeId";
     private static final String PREF_LAST_TAB = "lastTab";
 
-    private Button navHostsBtn, navQrBtn, navCfBtn;
-    private LinearLayout panelHosts, panelQr, panelCf;
+    private Button navHostsBtn, navQrBtn, navCfBtn, navDimBtn;
+    private LinearLayout panelHosts, panelQr, panelCf, panelDim;
     private Button btnQrRefresh;
     private Button btnQrService;
     private Button btnHostsRefresh;
@@ -89,6 +91,17 @@ public class MainActivity extends Activity {
     private TextView tvQrUrl;
     private TextView tvServerStatus;
     private ImageView imgQr;
+
+    // 亮度面板（软件遮罩调光）
+    private TextView tvDimStatus, tvDimPerm, tvDimValue, tvDimTempText;
+    private DimBar dimBar;
+    private LinearLayout dimSliderBox;
+    private Button btnDimToggle, btnDimMinus, btnDimPlus, btnDimTemp;
+    private Button btnDimDay, btnDimMovie, btnDimNight, btnDimGrant;
+    private Button btnInstMb;
+    private TextView tvInstStatus;
+    /** 只在本次进程里试一次自动授权，避免每次切页都去敲一遍 su */
+    private boolean dimAutoGrantTried = false;
 
     // CF 面板
     private Button btnCfStart;
@@ -181,6 +194,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AppContextHolder.init(this);
+        DimManager.init(this);
         uiScaleCache = -1f;
         prefs = getSharedPreferences("hostbox", Context.MODE_PRIVATE);
 
@@ -205,6 +219,7 @@ public class MainActivity extends Activity {
         navHostsBtn = findViewById(R.id.nav_hosts);
         navQrBtn = findViewById(R.id.nav_qr);
         navCfBtn = findViewById(R.id.nav_cf);
+        navDimBtn = findViewById(R.id.nav_dim);
         tvRootStatus = findViewById(R.id.root_text);
         imgRootIcon = findViewById(R.id.root_icon);
 
@@ -242,16 +257,19 @@ public class MainActivity extends Activity {
         navHostsBtn.setOnFocusChangeListener(navFocus);
         navQrBtn.setOnFocusChangeListener(navFocus);
         navCfBtn.setOnFocusChangeListener(navFocus);
+        navDimBtn.setOnFocusChangeListener(navFocus);
         applyNavStyle();
 
         panelHosts = buildHostsPanel();
         panelQr = buildQrPanel();
         panelCf = buildCfPanel();
+        panelDim = buildDimPanel();
 
         ViewGroup content = findViewById(R.id.content);
         content.addView(panelHosts);
         content.addView(panelQr);
         content.addView(panelCf);
+        content.addView(panelDim);
 
         // 全局记一下光标停在按钮行的哪一枚，从列表往下走时回到同一枚
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener(
@@ -273,17 +291,21 @@ public class MainActivity extends Activity {
         navCfBtn.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { showTab(2); }
         });
+        navDimBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showTab(3); }
+        });
 
         // 方向键显式绑定，不依赖 FocusFinder 猜测（否则在页签上按左右可能没反应）
         // 左右移动焦点时直接切到该页签内容，无需再按 OK
         wireNavKeys(navHostsBtn, 0, R.id.nav_qr, -1, 1);
         wireNavKeys(navQrBtn, R.id.nav_hosts, R.id.nav_cf, 0, 2);
-        wireNavKeys(navCfBtn, R.id.nav_qr, 0, 1, -1);
+        wireNavKeys(navCfBtn, R.id.nav_qr, R.id.nav_dim, 1, 3);
+        wireNavKeys(navDimBtn, R.id.nav_cf, 0, 2, -1);
 
         // 首次进入不抢内容区焦点：焦点默认停在「Hosts 管理」页签上
         // 上次停在哪个页签就回到哪个（换主题会重建界面，这样不会跳回第一页）
         int savedTab = prefs.getInt(PREF_LAST_TAB, 0);
-        showTab(savedTab >= 0 && savedTab < 3 ? savedTab : 0, false);
+        showTab(savedTab >= 0 && savedTab < 4 ? savedTab : 0, false);
 
         ConfigServer.setStatusListener(new ConfigServer.StatusListener() {
             @Override public void onStatus(String msg) {
@@ -302,7 +324,32 @@ public class MainActivity extends Activity {
                 });
             }
         });
+        ConfigServer.setDimChangeListener(new ConfigServer.DimChangeListener() {
+            @Override public void onDimChanged() {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { refreshDimUi(); }
+                });
+            }
+        });
         startServer();
+
+        // 上次开着调光：进程重启后按保存的设置恢复。root 授权/起服务放子线程，
+        // 避免 su 会话万一卡住时把主线程拖成 ANR。
+        if (DimManager.isOn()) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    final String err = DimManager.apply(AppContextHolder.get(), true,
+                            DimManager.brightness(), DimManager.temp());
+                    if (uiGone()) return;
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            refreshDimUi();
+                            if (err != null) toast(err);
+                        }
+                    });
+                }
+            }, "DimRestore").start();
+        }
 
         loadHostsAsync();
         checkRootAsync();
@@ -346,6 +393,10 @@ public class MainActivity extends Activity {
         super.onResume();
         // 盒子 IP 可能在后台被 DHCP 改变，回到前台/回到本页时刷新二维码
         if (currentTab == 1) refreshQr();
+        if (currentTab == 3) {
+            refreshDimUi();
+            ensureDimPermission();
+        }
     }
 
     @Override
@@ -355,7 +406,8 @@ public class MainActivity extends Activity {
         // 等第一次真正拿到窗口焦点时再把光标放到页签，避免启动后落到底部「刷新」按钮。
         if (hasFocus && !initialFocusDone) {
             initialFocusDone = true;
-            final View tab = currentTab == 1 ? navQrBtn : currentTab == 2 ? navCfBtn : navHostsBtn;
+            final View tab = currentTab == 1 ? navQrBtn : currentTab == 2 ? navCfBtn
+                    : currentTab == 3 ? navDimBtn : navHostsBtn;
             if (tab != null) {
                 // 再 post 一次，确保布局完成后再抢焦点（低端盒子上 onWindowFocusChanged 可能早于首帧）
                 tab.post(new Runnable() {
@@ -394,8 +446,13 @@ public class MainActivity extends Activity {
         panelHosts.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         panelQr.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         panelCf.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        panelDim.setVisibility(index == 3 ? View.VISIBLE : View.GONE);
         applyNavStyle();
         if (index == 1) refreshQr();
+        if (index == 3) {
+            refreshDimUi();
+            ensureDimPermission();
+        }
         // 焦点自动落位，避免遥控器"盲按"
         if (moveFocusIntoContent) focusContent(index);
         else setHint("←→ 切换页签 · ↓ 进入内容 · OK 选中");
@@ -409,7 +466,7 @@ public class MainActivity extends Activity {
             return true;
         } else if (index == 1) {
             return btnQrRefresh != null && btnQrRefresh.requestFocus();
-        } else {
+        } else if (index == 2) {
             // 过程表就是成绩单：跑过就回到"框态"（↑↓ 直接离开这一块，OK 才进条目），
             // 和切到 hosts 页一样——换页不该把人丢进一百条结果中间
             if (cfFinished && cfLive != null && cfLive.getVisibility() == View.VISIBLE) {
@@ -417,6 +474,9 @@ public class MainActivity extends Activity {
                 return cfLive.requestFocus();
             }
             return btnCfStart != null && btnCfStart.requestFocus();
+        } else {
+            // 亮度页：默认停在滑块上，左右键直接调，不用先摸按钮
+            return dimSliderBox != null && dimSliderBox.requestFocus();
         }
     }
 
@@ -497,9 +557,10 @@ public class MainActivity extends Activity {
     /** 内容区按左右键也能切页签（和页签栏行为一致），焦点跟着回到页签上 */
     private void switchTabByKey(int delta) {
         int next = currentTab + delta;
-        if (next < 0 || next > 2) return;
+        if (next < 0 || next > 3) return;
         showTab(next, false);
-        View tab = next == 0 ? navHostsBtn : next == 1 ? navQrBtn : navCfBtn;
+        View tab = next == 0 ? navHostsBtn : next == 1 ? navQrBtn
+                : next == 2 ? navCfBtn : navDimBtn;
         if (tab != null) tab.requestFocus();
     }
 
@@ -549,6 +610,7 @@ public class MainActivity extends Activity {
         styleNav(navHostsBtn, currentTab == 0);
         styleNav(navQrBtn, currentTab == 1);
         styleNav(navCfBtn, currentTab == 2);
+        styleNav(navDimBtn, currentTab == 3);
     }
 
     private void styleNav(View v, boolean active) {
@@ -1520,7 +1582,8 @@ public class MainActivity extends Activity {
                         });
                         return;
                     }
-                    UpdateChecker.download(info.apkUrl, apk, info.size,
+                    // 传整个 info：里面有 asset id，直链 502 时会自动切到 GitHub API 资产通道
+                    UpdateChecker.download(info, apk,
                             new UpdateChecker.DownloadProgress() {
                         @Override public void onProgress(final long done, final long total) {
                             ui.post(new Runnable() {
@@ -2016,6 +2079,346 @@ public class MainActivity extends Activity {
                 showBackupList();
             }
         });
+    }
+
+    // ==================== Tab 3: 亮度管理 ====================
+
+    /**
+     * 亮度页：遥控器只认「左右调、OK 开关」，按钮是给不想连按的人用的快捷方式。
+     * 遮罩盖住的是整个系统，所以这一页自己也跟着变暗——亮度下限锁在 30%，
+     * 保证任何时候都能看清界面、把调光关掉。
+     */
+    private LinearLayout buildDimPanel() {
+        LinearLayout root = verticalPanel();
+
+        TextView title = new TextView(this);
+        styleTitle(title, "亮度管理", "软件遮罩调光 · 遥控器左右键即可调整，手机网页里也能拖滑块");
+        title.setPadding(0, 0, 0, dp(2));
+
+        tvDimStatus = new TextView(this);
+        styleText(tvDimStatus, COLOR_HINT, 13);
+        tvDimStatus.setGravity(Gravity.CENTER);
+        tvDimStatus.setBackground(Skin.pill(th, th.hint));
+        tvDimStatus.setPadding(dp(12), dp(6), dp(12), dp(6));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.BOTTOM);
+        head.addView(title, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams lpStatus = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpStatus.setMargins(dp(12), 0, 0, dp(8));
+        head.addView(tvDimStatus, lpStatus);
+        root.addView(head);
+
+        // ---- 可聚焦的滑块框：左右键直接调亮度 ----
+        dimSliderBox = new LinearLayout(this);
+        dimSliderBox.setOrientation(LinearLayout.VERTICAL);
+        dimSliderBox.setFocusable(true);
+        dimSliderBox.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        dimSliderBox.setBackground(Skin.card(th));
+        dimSliderBox.setPadding(dp(20), dp(16), dp(20), dp(16));
+        LinearLayout.LayoutParams lpBox = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpBox.topMargin = dp(14);
+        dimSliderBox.setLayoutParams(lpBox);
+
+        LinearLayout valueRow = new LinearLayout(this);
+        valueRow.setOrientation(LinearLayout.HORIZONTAL);
+        valueRow.setGravity(Gravity.CENTER_VERTICAL);
+        tvDimValue = new TextView(this);
+        tvDimValue.setTextColor(COLOR_ACCENT);
+        tvDimValue.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(40));
+        tvDimValue.setTypeface(null, android.graphics.Typeface.BOLD);
+        valueRow.addView(tvDimValue);
+        tvDimTempText = new TextView(this);
+        styleText(tvDimTempText, COLOR_HINT, 14);
+        tvDimTempText.setPadding(dp(16), 0, 0, 0);
+        valueRow.addView(tvDimTempText);
+        dimSliderBox.addView(valueRow);
+
+        dimBar = new DimBar(this);
+        dimBar.configure(COLOR_ACCENT, Theme.alpha(COLOR_TEXT, 0.14f), COLOR_TEXT);
+        LinearLayout.LayoutParams lpBar = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(30));
+        lpBar.topMargin = dp(10);
+        dimSliderBox.addView(dimBar, lpBar);
+
+        TextView sliderTip = new TextView(this);
+        styleText(sliderTip, COLOR_HINT, 13);
+        sliderTip.setText("←→ 每次 5% · OK 开关调光 · ↓ 更多按钮");
+        LinearLayout.LayoutParams lpTip = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpTip.topMargin = dp(6);
+        dimSliderBox.addView(sliderTip, lpTip);
+
+        dimSliderBox.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override public void onFocusChange(View v, boolean hasFocus) {
+                v.setBackground(hasFocus ? Skin.cardFocus(th) : Skin.card(th));
+                if (hasFocus) setHint("←→ 调亮度 · OK 开关 · ↓ 更多按钮 · ↑ 回页签");
+            }
+        });
+        dimSliderBox.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                int b = DimManager.brightness();
+                int k = DimManager.temp();
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    applyDimAsync(true, b - 5, k);
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    applyDimAsync(true, b + 5, k);
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                        || keyCode == KeyEvent.KEYCODE_ENTER) {
+                    toggleDim();
+                    return true;
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                    return navDimBtn != null && navDimBtn.requestFocus();
+                }
+                if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    return btnDimToggle != null && btnDimToggle.requestFocus();
+                }
+                return false;
+            }
+        });
+        root.addView(dimSliderBox);
+
+        tvDimPerm = new TextView(this);
+        styleText(tvDimPerm, COLOR_HINT, 13);
+        LinearLayout.LayoutParams lpPerm = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpPerm.topMargin = dp(12);
+        root.addView(tvDimPerm, lpPerm);
+
+        // ---- 第一行：开关 / 微调 / 色温 ----
+        btnDimToggle = actionButton("开启调光", new View.OnClickListener() {
+            @Override public void onClick(View v) { toggleDim(); }
+        });
+        btnDimMinus = actionButton("− 5%", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                applyDimAsync(true, DimManager.brightness() - 5, DimManager.temp());
+            }
+        });
+        btnDimPlus = actionButton("+ 5%", new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                applyDimAsync(true, DimManager.brightness() + 5, DimManager.temp());
+            }
+        });
+        btnDimTemp = actionButton("色温", new View.OnClickListener() {
+            @Override public void onClick(View v) { cycleDimTemp(); }
+        });
+        Button[] row1 = {btnDimToggle, btnDimMinus, btnDimPlus, btnDimTemp};
+        LinearLayout buttons1 = new LinearLayout(this);
+        LinearLayout.LayoutParams lpRow1 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRow1.topMargin = dp(14);
+        buttons1.setLayoutParams(lpRow1);
+        addButtons(buttons1, row1);
+        wireButtonRow(row1, dimSliderBox);
+        root.addView(buttons1);
+
+        // ---- 第二行：预设 ----
+        btnDimDay = actionButton("日间 100%", new View.OnClickListener() {
+            @Override public void onClick(View v) { applyDimAsync(true, 100, 6500); }
+        });
+        btnDimMovie = actionButton("观影 80%", new View.OnClickListener() {
+            @Override public void onClick(View v) { applyDimAsync(true, 80, 6500); }
+        });
+        btnDimNight = actionButton("夜间 50% 暖色", new View.OnClickListener() {
+            @Override public void onClick(View v) { applyDimAsync(true, 50, 3600); }
+        });
+        btnDimGrant = actionButton("一键授权", new View.OnClickListener() {
+            @Override public void onClick(View v) { grantDimAsync(); }
+        });
+        Button[] row2 = {btnDimDay, btnDimMovie, btnDimNight, btnDimGrant};
+        LinearLayout buttons2 = new LinearLayout(this);
+        LinearLayout.LayoutParams lpRow2 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRow2.topMargin = dp(10);
+        buttons2.setLayoutParams(lpRow2);
+        addButtons(buttons2, row2);
+        wireButtonRow(row2, btnDimToggle);
+        root.addView(buttons2);
+
+        // ---- 第三行：一键把 MidnightBeam 下载并安装到盒子（不用电脑 adb） ----
+        btnInstMb = actionButton("安装 MidnightBeam", new View.OnClickListener() {
+            @Override public void onClick(View v) { installMidnightBeam(); }
+        });
+        Button[] row3 = {btnInstMb};
+        LinearLayout buttons3 = new LinearLayout(this);
+        LinearLayout.LayoutParams lpRow3 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpRow3.topMargin = dp(10);
+        buttons3.setLayoutParams(lpRow3);
+        addButtons(buttons3, row3);
+        wireButtonRow(row3, btnDimDay);
+        root.addView(buttons3);
+
+        tvInstStatus = new TextView(this);
+        styleText(tvInstStatus, COLOR_HINT, 12);
+        tvInstStatus.setText("一键从官方 Release 下载并静默安装到盒子（需要 root 与网络）；手机网页里也有同样入口");
+        LinearLayout.LayoutParams lpInst = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpInst.topMargin = dp(6);
+        root.addView(tvInstStatus, lpInst);
+
+        TextView note = new TextView(this);
+        note.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp(12));
+        note.setTextColor(COLOR_HINT);
+        note.setLineSpacing(dp(3), 1f);
+        note.setText("盒子没有背光硬件，这里盖的是一层全局半透明遮罩：桌面、直播、视频一起变暗，"
+                + "电视本身亮度不变；HDR 片源建议关掉。设置会保存，重启后自动恢复。");
+        note.setBackground(Skin.strip(th));
+        note.setPadding(dp(14), dp(9), dp(14), dp(9));
+        LinearLayout.LayoutParams lpNote = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lpNote.topMargin = dp(14);
+        root.addView(note, lpNote);
+
+        refreshDimUi();
+        return root;
+    }
+
+    /** 电视端一键安装：下载发生在盒子上，这个界面只负责发起和读进度 */
+    private void installMidnightBeam() {
+        if (!ApkInstaller.start(this, "midnightbeam", null)) {
+            toast("已有安装任务在进行中，等它跑完再点");
+            return;
+        }
+        toast("开始下载 MidnightBeam…");
+        pollInstallStatus();
+    }
+
+    private void pollInstallStatus() {
+        if (tvInstStatus == null || uiGone()) return;
+        try {
+            JSONObject st = new JSONObject(ApkInstaller.stateJson());
+            final String p = st.optString("phase", "idle");
+            tvInstStatus.setText("安装进度：" + st.optString("message", ""));
+            tvInstStatus.setTextColor("error".equals(p) ? COLOR_DANGER
+                    : "done".equals(p) ? COLOR_OK : COLOR_HINT);
+            if ("downloading".equals(p) || "installing".equals(p)) {
+                tvInstStatus.postDelayed(new Runnable() {
+                    @Override public void run() { pollInstallStatus(); }
+                }, 800);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** 刷新亮度页所有状态文本/进度/按钮 */
+    private void refreshDimUi() {
+        if (tvDimStatus == null) return;
+        boolean on = DimManager.isOn();
+        int b = DimManager.brightness();
+        int k = DimManager.temp();
+        tvDimValue.setText(b + "%");
+        tvDimTempText.setText(k >= 6400 ? "中性 · 6500K" : "暖色 · " + k + "K");
+        tvDimStatus.setText(on ? "● 已开启 · " + b + "%" : "○ 已关闭");
+        tvDimStatus.setTextColor(on ? COLOR_OK : COLOR_HINT);
+        tvDimStatus.setBackground(Skin.pill(th, on ? th.ok : th.hint));
+        btnDimToggle.setText(on ? "关闭调光" : "开启调光");
+        if (dimBar != null) dimBar.setValue(b);
+        boolean perm = DimManager.hasPermission(this);
+        tvDimPerm.setText(perm
+                ? "✔ 已获得悬浮窗权限 · 遮罩覆盖桌面与所有应用"
+                : "⚠ 缺少「显示在其他应用上层」权限，点右下角「一键授权」用 root 自动开通");
+        tvDimPerm.setTextColor(perm ? COLOR_HINT : COLOR_DANGER);
+        btnDimGrant.setVisibility(perm ? View.GONE : View.VISIBLE);
+    }
+
+    /** apply 里可能要跑 su，统一切到子线程，主线程只负责刷新 */
+    private void applyDimAsync(final boolean enabled, final int b, final int k) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String err = DimManager.apply(AppContextHolder.get(), enabled, b, k);
+                if (uiGone()) return;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        refreshDimUi();
+                        if (err != null) toast(err);
+                    }
+                });
+            }
+        }, "DimApply").start();
+    }
+
+    private void toggleDim() {
+        boolean on = DimManager.isOn();
+        applyDimAsync(!on, DimManager.brightness(), DimManager.temp());
+    }
+
+    /** 色温三档循环：6500K 中性 → 4500K 微暖 → 3300K 护眼 */
+    private void cycleDimTemp() {
+        int k = DimManager.temp();
+        int next = k >= 6400 ? 4500 : (k >= 4400 ? 3300 : 6500);
+        applyDimAsync(true, DimManager.brightness(), next);
+    }
+
+    /** 进页面时自动补一次权限，用户不用手动去系统设置里翻（这台 ROM 也没那个入口） */
+    private void ensureDimPermission() {
+        if (dimAutoGrantTried || DimManager.hasPermission(this)) return;
+        dimAutoGrantTried = true;
+        grantDimAsync();
+    }
+
+    private void grantDimAsync() {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final boolean ok = DimManager.grantByRoot()
+                        && DimManager.hasPermission(AppContextHolder.get());
+                if (uiGone()) return;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        refreshDimUi();
+                        toast(ok ? "悬浮窗权限已开通" : "授权失败：root 不可用？");
+                    }
+                });
+            }
+        }, "DimGrant").start();
+    }
+
+    /** 亮度条：一条轨道 + 已选段 + 圆点，纯自绘，不引入任何依赖 */
+    private static class DimBar extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int value = 80;
+        private int accent = 0xFF4FC3F7, track = 0x33FFFFFF, knob = 0xFFFFFFFF;
+
+        DimBar(Context c) { super(c); }
+
+        void configure(int accentColor, int trackColor, int knobColor) {
+            accent = accentColor;
+            track = trackColor;
+            knob = knobColor;
+            invalidate();
+        }
+
+        void setValue(int v) {
+            value = v < DimManager.MIN_BRIGHT ? DimManager.MIN_BRIGHT
+                    : (v > DimManager.MAX_BRIGHT ? DimManager.MAX_BRIGHT : v);
+            invalidate();
+        }
+
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            int barH = Math.max(6, h / 3);
+            float radius = barH / 2f;
+            float top = (h - barH) / 2f;
+            paint.setColor(track);
+            c.drawRoundRect(0, top, w, top + barH, radius, radius, paint);
+            float ratio = (value - DimManager.MIN_BRIGHT)
+                    / (float) (DimManager.MAX_BRIGHT - DimManager.MIN_BRIGHT);
+            float end = Math.max(radius * 2, w * ratio);
+            paint.setColor(accent);
+            c.drawRoundRect(0, top, end, top + barH, radius, radius, paint);
+            paint.setColor(knob);
+            c.drawCircle(end - radius, h / 2f, radius * 1.15f, paint);
+        }
     }
 
     // ==================== Tab 1: 扫码配置 ====================
@@ -3867,7 +4270,7 @@ public class MainActivity extends Activity {
 
         LinearLayout nav = (LinearLayout) findViewById(R.id.nav_bar);
         nav.setPadding(nav.getPaddingLeft(), dp(10), nav.getPaddingRight(), dp(6));
-        int[] navIds = new int[]{R.id.nav_hosts, R.id.nav_qr, R.id.nav_cf};
+        int[] navIds = new int[]{R.id.nav_hosts, R.id.nav_qr, R.id.nav_cf, R.id.nav_dim};
         for (int i = 0; i < navIds.length; i++) {
             Button b = (Button) findViewById(navIds[i]);
             LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) b.getLayoutParams();

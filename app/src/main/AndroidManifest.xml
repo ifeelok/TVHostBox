@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
+    <!-- 全局调光：全屏悬浮遮罩 + 前台服务保活 + 开机恢复 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!--
       电视相关声明三件套，缺一件电视桌面上就找不到这个应用：
        1. LEANBACK category —— 原生 Leanback 启动器只列出带它的应用；
@@ -39,5 +44,18 @@
                 <category android:name="android.intent.category.LEANBACK" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".DimService"
+            android:exported="false" />
+
+        <receiver
+            android:name=".DimBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

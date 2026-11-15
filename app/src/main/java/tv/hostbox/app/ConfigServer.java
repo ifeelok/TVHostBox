@@ -28,12 +28,23 @@ import java.util.concurrent.Executors;
  *   POST /api/raw     → body 为新的 hosts 全文，校验后写入
  *   POST /api/set     → form: ip=&domain=  新增/替换一条解析
  *   POST /api/delete  → form: domain=      删除某域名的解析
+ *   GET  /api/dim/state → 当前亮度/色温/开关/权限
+ *   POST /api/dim/set → form: bright=&temp=&on=  调整全局调光
+ *   POST /api/dim/off → 立即关闭调光、恢复原画面
+ *   POST /api/install → form: mode=url&url=<APK 直链> | mode=latest | mode=midnightbeam
+ *                      手机网页只发指令，APK 由盒子自己下载并 root 静默安装，不落到手机
+ *   GET  /api/install/status → 安装进度/结果（页面轮询）
  */
 public final class ConfigServer {
 
     public interface StatusListener {
         void onStatus(String msg);
         void onDataChanged();
+    }
+
+    /** 手机网页改了亮度时通知电视端界面同步（两边看到的状态要一致） */
+    public interface DimChangeListener {
+        void onDimChanged();
     }
 
     public static final int PORT = 18123;
@@ -43,12 +54,17 @@ public final class ConfigServer {
     private static Thread acceptThread;
     private static final ExecutorService WORKERS = Executors.newCachedThreadPool();
     private static volatile StatusListener listener;
+    private static volatile DimChangeListener dimListener;
     private static volatile String pageCache;
 
     private ConfigServer() {}
 
     public static void setStatusListener(StatusListener l) {
         listener = l;
+    }
+
+    public static void setDimChangeListener(DimChangeListener l) {
+        dimListener = l;
     }
 
     public static synchronized boolean isRunning() {
@@ -89,6 +105,11 @@ public final class ConfigServer {
     private static void notifyDataChanged() {
         StatusListener l = listener;
         if (l != null) l.onDataChanged();
+    }
+
+    private static void notifyDimChanged() {
+        DimChangeListener l = dimListener;
+        if (l != null) l.onDimChanged();
     }
 
     private static void acceptLoop() {
@@ -171,6 +192,45 @@ public final class ConfigServer {
                 respond(s, 200, "text/html; charset=utf-8", mobilePage());
             } else if ("GET".equals(method) && "/api/state".equals(path)) {
                 respond(s, 200, "application/json; charset=utf-8", buildStateJson());
+            } else if ("GET".equals(method) && "/api/dim/state".equals(path)) {
+                respond(s, 200, "application/json; charset=utf-8",
+                        DimManager.stateJson(AppContextHolder.get()));
+            } else if ("POST".equals(method) && "/api/dim/set".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                int dimBright = DimManager.clampBright(parseInt(f.get("bright"), DimManager.brightness()));
+                int dimTemp = DimManager.clampTemp(parseInt(f.get("temp"), DimManager.temp()));
+                // on 省略视为开启；传 0 才关。手机端滑块一动就应该是"生效中"
+                boolean dimOn = !"0".equals(f.get("on"));
+                String err = DimManager.apply(AppContextHolder.get(), dimOn, dimBright, dimTemp);
+                if (err != null) {
+                    respond(s, 500, "text/plain; charset=utf-8", err);
+                } else {
+                    respond(s, 200, "application/json; charset=utf-8",
+                            DimManager.stateJson(AppContextHolder.get()));
+                    notifyDimChanged();
+                }
+            } else if ("POST".equals(method) && "/api/dim/off".equals(path)) {
+                String err = DimManager.apply(AppContextHolder.get(), false,
+                        DimManager.brightness(), DimManager.temp());
+                if (err != null) {
+                    respond(s, 500, "text/plain; charset=utf-8", err);
+                } else {
+                    respond(s, 200, "text/plain; charset=utf-8", "已关闭调光");
+                    notifyDimChanged();
+                }
+            } else if ("GET".equals(method) && "/api/install/status".equals(path)) {
+                respond(s, 200, "application/json; charset=utf-8", ApkInstaller.stateJson());
+            } else if ("POST".equals(method) && "/api/install".equals(path)) {
+                Map<String, String> f = parseForm(body);
+                String mode = f.get("mode");
+                boolean started = ApkInstaller.start(AppContextHolder.get(),
+                        mode == null ? "url" : mode, f.get("url"));
+                if (!started) {
+                    respond(s, 409, "text/plain; charset=utf-8",
+                            "已有安装任务在跑，或链接不合法（只接受 http/https 的 APK 直链）");
+                } else {
+                    respond(s, 200, "application/json; charset=utf-8", ApkInstaller.stateJson());
+                }
             } else if ("GET".equals(method) && "/api/raw".equals(path)) {
                 try {
                     respond(s, 200, "text/plain; charset=utf-8", HostsManager.readRaw());
@@ -318,6 +378,12 @@ public final class ConfigServer {
             } catch (Exception ignored) {}
         }
         return map;
+    }
+
+    /** 表单数字：没带/写错就沿用当前值，免得手机端一个空参数把亮度重置掉 */
+    private static int parseInt(String v, int fallback) {
+        if (v == null) return fallback;
+        try { return Integer.parseInt(v.trim()); } catch (Exception ignored) { return fallback; }
     }
 
     private static String validateAll(String content) {
